@@ -1,0 +1,23 @@
+# Baseline config placeholder for the GaussianGPT AE reproduction.
+# This file records project-level defaults only; model internals are intentionally omitted.
+
+project:
+  name: gaussiangpt-ae
+  seed: 42
+
+data:
+  root: data/raw
+  processed_root: data/processed
+  cache_root: data/cache
+
+gaussian_features:
+  order:
+    - relative_xyz
+    - color
+    - opacity
+    - scale
+    - rotation
+  dim: 14
+
+runtime:
+  device: cpu

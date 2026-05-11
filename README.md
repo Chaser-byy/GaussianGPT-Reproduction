@@ -1,0 +1,42 @@
+# GaussianGPT AE Reproduction
+
+Paper-level reproduction scaffold for the Autoencoder part of GaussianGPT.
+
+The official GaussianGPT implementation is not available, so this repository should only encode behavior described by the paper and locally verified assumptions.
+
+## Scope
+
+Target pipeline:
+
+```text
+3DGS point_cloud.ply
+-> Gaussian primitive dict
+-> voxelized sparse grid
+-> sparse 3D CNN encoder
+-> LFQ / VQ latent indices
+-> sparse 3D CNN decoder
+-> reconstructed Gaussian attributes
+```
+
+This initial scaffold intentionally does not include model code.
+
+## Local Development
+
+Local WSL development is for CPU-safe code paths only:
+
+- PLY IO
+- voxelization
+- dataset and collate logic
+- Gaussian feature heads
+- LFQ
+- loss functions
+- config parsing
+- syntax, data-processing, and shape tests
+
+CUDA-only dependencies such as `spconv`, `diff-gaussian-rasterization`, `simple-knn`, and 3DGS renderers must stay behind lazy imports with clear error messages.
+
+## Test
+
+```bash
+pytest -q
+```

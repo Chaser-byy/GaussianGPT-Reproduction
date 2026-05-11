@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.pyc
+.pytest_cache/
+.venv/
+outputs/
+data/raw/
+*.ply
+*.pt
+*.pth
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Data and generated artifacts
+data/raw/
+data/processed/
+data/cache/
+data/tokens/
+outputs/
+runs/
+wandb/
+
+# Checkpoints and large assets
+*.pt
+*.pth
+*.ckpt
+*.ply
+*.npz
+*.npy
+*.tar
+*.zip
+
+# Local tooling
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
