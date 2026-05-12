@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional, Union
 
 import numpy as np
 
@@ -13,7 +13,7 @@ from gaussiangpt_ae.data.schema import GaussianScene, validate_gaussian_scene
 GAUSSIAN_NPZ_FIELDS = ("xyz", "color", "opacity", "scale", "rotation")
 
 
-def gaussian_npz_missing_fields(path: str | Path) -> list[str]:
+def gaussian_npz_missing_fields(path: Union[str, Path]) -> list[str]:
     """Return missing standard Gaussian NPZ fields."""
 
     with np.load(Path(path), allow_pickle=False) as data:
@@ -21,7 +21,7 @@ def gaussian_npz_missing_fields(path: str | Path) -> list[str]:
     return [field for field in GAUSSIAN_NPZ_FIELDS if field not in present]
 
 
-def is_gaussian_npz(path: str | Path) -> bool:
+def is_gaussian_npz(path: Union[str, Path]) -> bool:
     """Return True when an NPZ contains the standard Gaussian fields."""
 
     try:
@@ -38,9 +38,9 @@ def _read_optional_string(value: Any) -> str:
 
 
 def read_gaussian_npz(
-    path: str | Path,
-    scene_id: str | None = None,
-    metadata: dict | None = None,
+    path: Union[str, Path],
+    scene_id: Optional[str] = None,
+    metadata: Optional[dict] = None,
 ) -> GaussianScene:
     """Read one standard Gaussian NPZ into a GaussianScene."""
 
@@ -71,4 +71,3 @@ def read_gaussian_npz(
 
     validate_gaussian_scene(scene)
     return scene
-

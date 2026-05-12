@@ -7,7 +7,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Optional, Union
 
 import numpy as np
 from plyfile import PlyData
@@ -29,7 +29,7 @@ METADATA_FILENAMES = (
 EXTRA_DIR_NAMES = ("images", "image", "depth", "camera", "cameras", "trajectory")
 
 
-@dataclass(slots=True)
+@dataclass
 class ASEGaussianItem:
     """A discovered ASE Gaussian asset and nearby context files."""
 
@@ -64,7 +64,7 @@ def _metadata_paths(scene_dir: Path, gaussian_path: Path) -> list[Path]:
 
 
 def _extra_files(scene_dir: Path) -> dict:
-    extras: dict[str, str | list[str]] = {}
+    extras: dict[str, Union[str, list[str]]] = {}
     if not scene_dir.exists():
         return extras
 
@@ -123,7 +123,7 @@ def _candidate_paths(root: Path) -> Iterator[Path]:
     yield from root.rglob("*.npz")
 
 
-def discover_ase_gaussian_items(root: str | Path) -> list[ASEGaussianItem]:
+def discover_ase_gaussian_items(root: Union[str, Path]) -> list[ASEGaussianItem]:
     """Recursively discover readable ASE Gaussian files under a HF download root."""
 
     root = Path(root)
@@ -191,8 +191,8 @@ def read_ase_item(item: ASEGaussianItem) -> GaussianScene:
 
 
 def iter_ase_root(
-    root: str | Path,
-    scene_ids: set[str] | list[str] | tuple[str, ...] | None = None,
+    root: Union[str, Path],
+    scene_ids: Optional[Union[set[str], list[str], tuple[str, ...]]] = None,
 ) -> Iterator[GaussianScene]:
     """Yield GaussianScene objects one by one from an ASE root."""
 
@@ -204,9 +204,9 @@ def iter_ase_root(
 
 
 def read_ase_root(
-    root: str | Path,
-    limit: int | None = None,
-    scene_ids: set[str] | list[str] | tuple[str, ...] | None = None,
+    root: Union[str, Path],
+    limit: Optional[int] = None,
+    scene_ids: Optional[Union[set[str], list[str], tuple[str, ...]]] = None,
 ) -> list[GaussianScene]:
     """Read ASE Gaussian scenes from a local root."""
 
@@ -218,7 +218,9 @@ def read_ase_root(
     return scenes
 
 
-def _safe_num_gaussians(path: Path, gaussian_format: str) -> tuple[int | None, str | None]:
+def _safe_num_gaussians(
+    path: Path, gaussian_format: str
+) -> tuple[Optional[int], Optional[str]]:
     try:
         if gaussian_format == "ply":
             return len(PlyData.read(str(path))["vertex"].data), None
@@ -228,7 +230,7 @@ def _safe_num_gaussians(path: Path, gaussian_format: str) -> tuple[int | None, s
         return None, str(exc)
 
 
-def build_ase_manifest(root: str | Path) -> list[dict]:
+def build_ase_manifest(root: Union[str, Path]) -> list[dict]:
     """Build a JSON-serializable manifest for discovered ASE Gaussian items."""
 
     manifest: list[dict] = []
@@ -250,10 +252,9 @@ def build_ase_manifest(root: str | Path) -> list[dict]:
     return manifest
 
 
-def write_ase_manifest(manifest: list[dict], path: str | Path) -> None:
+def write_ase_manifest(manifest: list[dict], path: Union[str, Path]) -> None:
     """Write an ASE manifest as JSON."""
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Optional
 
 import numpy as np
 
 
-@dataclass(slots=True)
+@dataclass
 class GaussianScene:
     """Standard in-memory representation of one Gaussian scene."""
 
@@ -34,7 +35,7 @@ def validate_gaussian_scene(scene: GaussianScene) -> None:
         "rotation": (scene.rotation, 4),
     }
 
-    num_gaussians: int | None = None
+    num_gaussians: Optional[int] = None
     for name, (array, width) in arrays.items():
         if not isinstance(array, np.ndarray):
             raise ValueError(f"{name} must be np.ndarray")
@@ -53,4 +54,3 @@ def validate_gaussian_scene(scene: GaussianScene) -> None:
 
     if num_gaussians is None or num_gaussians <= 0:
         raise ValueError("N must be > 0")
-

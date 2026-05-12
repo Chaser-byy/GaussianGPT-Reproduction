@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional, Union
 
 import numpy as np
 from plyfile import PlyData
@@ -27,7 +28,7 @@ GAUSSIAN_PLY_FIELDS = (
 )
 
 
-def gaussian_ply_missing_fields(path: str | Path) -> list[str]:
+def gaussian_ply_missing_fields(path: Union[str, Path]) -> list[str]:
     """Return missing standard Gaussian PLY fields without materializing arrays."""
 
     ply = PlyData.read(str(path))
@@ -36,7 +37,7 @@ def gaussian_ply_missing_fields(path: str | Path) -> list[str]:
     return [field for field in GAUSSIAN_PLY_FIELDS if field not in present]
 
 
-def is_gaussian_ply(path: str | Path) -> bool:
+def is_gaussian_ply(path: Union[str, Path]) -> bool:
     """Return True when a PLY contains the standard Gaussian fields."""
 
     try:
@@ -50,9 +51,9 @@ def _stack_fields(vertex: np.ndarray, names: tuple[str, ...]) -> np.ndarray:
 
 
 def read_gaussian_ply(
-    path: str | Path,
-    scene_id: str | None = None,
-    metadata: dict | None = None,
+    path: Union[str, Path],
+    scene_id: Optional[str] = None,
+    metadata: Optional[dict] = None,
 ) -> GaussianScene:
     """Read one standard 3DGS Gaussian PLY into a GaussianScene."""
 
@@ -73,4 +74,3 @@ def read_gaussian_ply(
     )
     validate_gaussian_scene(scene)
     return scene
-

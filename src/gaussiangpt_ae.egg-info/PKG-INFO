@@ -2,7 +2,7 @@ Metadata-Version: 2.4
 Name: gaussiangpt-ae
 Version: 0.1.0
 Summary: Paper-level GaussianGPT Autoencoder reproduction scaffold.
-Requires-Python: >=3.10
+Requires-Python: >=3.9
 Description-Content-Type: text/markdown
 Requires-Dist: numpy>=1.24
 Requires-Dist: plyfile>=1.0
