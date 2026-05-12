@@ -8,7 +8,11 @@ from typing import Optional, Union
 import numpy as np
 from plyfile import PlyData
 
-from gaussiangpt_ae.data.schema import GaussianScene, validate_gaussian_scene
+from gaussiangpt_ae.data.schema import (
+    GaussianScene,
+    compute_gaussian_scene_stats as compute_gaussian_scene_stats,
+    validate_gaussian_scene,
+)
 
 GAUSSIAN_PLY_FIELDS = (
     "x",
@@ -44,6 +48,13 @@ def is_gaussian_ply(path: Union[str, Path]) -> bool:
         return not gaussian_ply_missing_fields(path)
     except Exception:
         return False
+
+
+def get_gaussian_ply_num_vertices(path: Union[str, Path]) -> int:
+    """Return the number of vertex rows in a PLY without building Gaussian arrays."""
+
+    ply = PlyData.read(str(path))
+    return int(len(ply["vertex"].data))
 
 
 def _stack_fields(vertex: np.ndarray, names: tuple[str, ...]) -> np.ndarray:

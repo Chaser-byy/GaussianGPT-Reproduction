@@ -54,3 +54,25 @@ def validate_gaussian_scene(scene: GaussianScene) -> None:
 
     if num_gaussians is None or num_gaussians <= 0:
         raise ValueError("N must be > 0")
+
+
+def compute_gaussian_scene_stats(scene: GaussianScene) -> dict:
+    """Compute lightweight, JSON-serializable stats for a GaussianScene."""
+
+    validate_gaussian_scene(scene)
+    xyz_min = scene.xyz.min(axis=0)
+    xyz_max = scene.xyz.max(axis=0)
+    xyz_mean = scene.xyz.mean(axis=0)
+
+    return {
+        "scene_id": scene.scene_id,
+        "num_gaussians": int(scene.xyz.shape[0]),
+        "xyz_min": xyz_min.astype(float).tolist(),
+        "xyz_max": xyz_max.astype(float).tolist(),
+        "xyz_mean": xyz_mean.astype(float).tolist(),
+        "opacity_min": float(scene.opacity.min()),
+        "opacity_max": float(scene.opacity.max()),
+        "opacity_mean": float(scene.opacity.mean()),
+        "scale_min": scene.scale.min(axis=0).astype(float).tolist(),
+        "scale_max": scene.scale.max(axis=0).astype(float).tolist(),
+    }

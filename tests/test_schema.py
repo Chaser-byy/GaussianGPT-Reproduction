@@ -1,7 +1,11 @@
 import numpy as np
 import pytest
 
-from gaussiangpt_ae.data.schema import GaussianScene, validate_gaussian_scene
+from gaussiangpt_ae.data.schema import (
+    GaussianScene,
+    compute_gaussian_scene_stats,
+    validate_gaussian_scene,
+)
 
 
 def make_scene() -> GaussianScene:
@@ -27,3 +31,13 @@ def test_validate_gaussian_scene_rejects_bad_shape() -> None:
     with pytest.raises(ValueError, match="opacity shape"):
         validate_gaussian_scene(scene)
 
+
+def test_compute_gaussian_scene_stats() -> None:
+    scene = make_scene()
+    scene.opacity[:] = [[0.25], [0.75]]
+
+    stats = compute_gaussian_scene_stats(scene)
+
+    assert stats["scene_id"] == "scene_0001"
+    assert stats["num_gaussians"] == 2
+    assert stats["opacity_mean"] == pytest.approx(0.5)

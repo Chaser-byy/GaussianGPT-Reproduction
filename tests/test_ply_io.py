@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 from plyfile import PlyData, PlyElement
 
-from gaussiangpt_ae.data.ply_io import read_gaussian_ply
+from gaussiangpt_ae.data.ply_io import get_gaussian_ply_num_vertices, read_gaussian_ply
 
 
 def write_fake_gaussian_ply(path: Path, n: int = 3) -> None:
@@ -47,3 +47,9 @@ def test_read_gaussian_ply(tmp_path: Path) -> None:
     assert scene.rotation.shape == (4, 4)
     assert scene.xyz.dtype == np.float32
 
+
+def test_get_gaussian_ply_num_vertices(tmp_path: Path) -> None:
+    path = tmp_path / "point_cloud.ply"
+    write_fake_gaussian_ply(path, n=7)
+
+    assert get_gaussian_ply_num_vertices(path) == 7
