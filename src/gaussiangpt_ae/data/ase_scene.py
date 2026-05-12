@@ -90,6 +90,7 @@ def discover_ase_scenes(root: Union[str, Path]) -> list[ASESceneRecord]:
     return [
         _record_for_scene_dir(scene_dir)
         for scene_dir in sorted(child for child in root.iterdir() if child.is_dir())
+        if not scene_dir.name.startswith(".")
     ]
 
 

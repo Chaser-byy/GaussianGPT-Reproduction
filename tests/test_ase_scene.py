@@ -81,6 +81,7 @@ def test_find_ase_ply_prefers_30000(tmp_path: Path) -> None:
 
 def test_discover_manifest_and_load_ase_scene(tmp_path: Path) -> None:
     scene_dir = make_fake_ase_scene(tmp_path)
+    (tmp_path / ".cache").mkdir()
 
     records = discover_ase_scenes(tmp_path)
 
