@@ -234,7 +234,6 @@ def build_ase_voxel_cache(
     overwrite: bool = False,
     seed: int = 42,
     scene_ids: Optional[List[str]] = None,
-    build_camera_cache: bool = True,
 ) -> Dict:
     """Voxelize ASE scenes once and save compact scene-level npz caches."""
 
@@ -243,8 +242,7 @@ def build_ase_voxel_cache(
     scenes_dir = output_root / "scenes"
     cameras_dir = output_root / "cameras"
     scenes_dir.mkdir(parents=True, exist_ok=True)
-    if build_camera_cache:
-        cameras_dir.mkdir(parents=True, exist_ok=True)
+    cameras_dir.mkdir(parents=True, exist_ok=True)
 
     results: List[Dict] = []
     for record in discover_ase_scenes(root):
@@ -255,7 +253,7 @@ def build_ase_voxel_cache(
         item = {
             "scene_id": record.scene_id,
             "cache_path": str(cache_path),
-            "camera_cache_path": str(camera_cache_path) if build_camera_cache else None,
+            "camera_cache_path": str(camera_cache_path),
             "written": False,
             "camera_cache_written": False,
             "skipped": False,
@@ -268,7 +266,7 @@ def build_ase_voxel_cache(
             continue
         if (
             cache_path.exists()
-            and (not build_camera_cache or camera_cache_path.exists())
+            and camera_cache_path.exists()
             and not overwrite
         ):
             item["skipped"] = True
@@ -278,7 +276,7 @@ def build_ase_voxel_cache(
         try:
             scene = load_ase_scene_gaussians(record)
             cameras = read_ase_cameras(record.transforms_path, scene_id=record.scene_id)
-            if build_camera_cache and (overwrite or not camera_cache_path.exists()):
+            if overwrite or not camera_cache_path.exists():
                 save_ase_camera_cache(cameras, camera_cache_path)
                 item["camera_cache_written"] = True
             quantized = quantize_scene_with_minkowski(
@@ -312,7 +310,7 @@ def build_ase_voxel_cache(
                 "scene_dir": str(record.scene_dir),
                 "ply_path": str(record.ply_path),
                 "transforms_path": str(record.transforms_path),
-                "camera_cache_path": str(camera_cache_path) if build_camera_cache else None,
+                "camera_cache_path": str(camera_cache_path),
                 "num_input_gaussians": int(scene.xyz.shape[0]),
                 "num_voxels": int(voxel_features["coords"].shape[0]),
                 "voxel_size": float(voxel_size),
@@ -349,8 +347,15 @@ def build_ase_voxel_cache(
             item["error"] = str(exc)
         results.append(item)
 
-    summary = build_ase_voxel_cache_summary(output_root)
+    summary = build_ase_voxel_cache_summary(output_root, scene_ids=scene_ids)
     summary["failed_scenes"] = sum(1 for item in results if item["error"] is not None)
+    summary["requested_scenes"] = scene_ids
+    summary["processed_scenes"] = len(results)
+    summary["newly_written_scenes"] = sum(1 for item in results if item["written"])
+    summary["newly_written_camera_caches"] = sum(
+        1 for item in results if item["camera_cache_written"]
+    )
+    summary["skipped_scenes"] = sum(1 for item in results if item["skipped"])
     summary["build_results"] = results
     return summary
 
@@ -374,11 +379,17 @@ def load_ase_voxel_cache(scene_cache_path: Union[str, Path]) -> Dict:
         }
 
 
-def build_ase_voxel_cache_summary(output_root: Union[str, Path]) -> Dict:
+def build_ase_voxel_cache_summary(
+    output_root: Union[str, Path],
+    scene_ids: Optional[List[str]] = None,
+) -> Dict:
     """Summarize an ASE voxel cache output directory."""
 
     output_root = Path(output_root)
     cache_paths = sorted((output_root / "scenes").glob("*.npz"))
+    if scene_ids is not None:
+        wanted = set(scene_ids)
+        cache_paths = [path for path in cache_paths if path.stem in wanted]
     num_voxels: List[int] = []
     voxel_sizes: List[float] = []
     for path in cache_paths:

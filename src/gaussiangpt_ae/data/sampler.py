@@ -253,15 +253,24 @@ class ASEOnlineChunkSampler:
         z_mode: str = "fixed_160",
         preferred_coverage: float = 0.4,
         scene_id: Optional[str] = None,
+        scene_ids: Optional[List[str]] = None,
     ) -> None:
         self.cache_root = Path(cache_root)
         self.scene_cache_paths = sorted((self.cache_root / "scenes").glob("*.npz"))
-        if scene_id is not None:
+        if scene_id is not None and scene_ids is not None:
+            raise ValueError("pass either scene_id or scene_ids, not both")
+        selected_scene_ids = [scene_id] if scene_id is not None else scene_ids
+        if selected_scene_ids is not None:
+            wanted = set(selected_scene_ids)
             self.scene_cache_paths = [
-                path for path in self.scene_cache_paths if path.stem == scene_id
+                path for path in self.scene_cache_paths if path.stem in wanted
             ]
         if not self.scene_cache_paths:
-            detail = f" for scene_id={scene_id}" if scene_id is not None else ""
+            detail = (
+                f" for scene_ids={selected_scene_ids}"
+                if selected_scene_ids is not None
+                else ""
+            )
             raise ValueError(
                 f"no ASE voxel cache files found under {self.cache_root}/scenes{detail}"
             )
@@ -274,7 +283,7 @@ class ASEOnlineChunkSampler:
         self.top_k_cameras = int(top_k_cameras)
         self.seed = int(seed)
         self.z_mode = z_mode
-        self.scene_id = scene_id
+        self.scene_ids = selected_scene_ids
         self.preferred_coverage = float(preferred_coverage)
         self.rng = np.random.RandomState(self.seed)
         if self.z_mode not in {"fixed_160", "full_height"}:
@@ -307,8 +316,7 @@ class ASEOnlineChunkSampler:
         if key not in self._camera_cache:
             if not camera_cache_path.is_file():
                 raise FileNotFoundError(
-                    f"missing ASE camera cache {camera_cache_path}; rebuild cache with "
-                    "--build-camera-cache"
+                    f"missing ASE camera cache {camera_cache_path}; rebuild the ASE cache"
                 )
             self._camera_cache[key] = load_ase_camera_cache(
                 camera_cache_path, scene_id=metadata["scene_id"]

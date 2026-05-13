@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Union
+from typing import Dict, List, Optional, Union
 
 from gaussiangpt_ae.data.sampler import ASEOnlineChunkSampler
 
@@ -22,6 +22,7 @@ class ASEChunkDataset:
         seed: int = 42,
         z_mode: str = "fixed_160",
         preferred_coverage: float = 0.4,
+        scene_ids: Optional[List[str]] = None,
     ) -> None:
         self.num_samples_per_epoch = int(num_samples_per_epoch)
         self.sampler = ASEOnlineChunkSampler(
@@ -33,6 +34,7 @@ class ASEChunkDataset:
             seed=seed,
             z_mode=z_mode,
             preferred_coverage=preferred_coverage,
+            scene_ids=scene_ids,
         )
 
     def __len__(self) -> int:

@@ -1,4 +1,8 @@
-"""Render a sampled ASE chunk GT image from the original 3DGS PLY."""
+"""Experimental debug render for a sampled ASE chunk using the original 3DGS PLY.
+
+This script is intentionally outside the Dataset/DataLoader path. It may use
+CUDA and diff_gaussian_rasterization, and should not be imported by training.
+"""
 
 from __future__ import annotations
 

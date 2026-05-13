@@ -1,4 +1,8 @@
-"""Smoke test ASE voxel cache, camera cache, and online chunk sampler."""
+"""Experimental smoke test for ASE sampler camera selection.
+
+Prefer debug_ase_dataloader.py when validating the training DataLoader path.
+This script is useful when inspecting per-sample camera scoring details only.
+"""
 
 from __future__ import annotations
 

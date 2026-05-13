@@ -17,9 +17,6 @@ def main() -> None:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--scene-id", action="append", default=None)
-    parser.add_argument("--build-camera-cache", dest="build_camera_cache", action="store_true")
-    parser.add_argument("--no-camera-cache", dest="build_camera_cache", action="store_false")
-    parser.set_defaults(build_camera_cache=True)
     args = parser.parse_args()
 
     summary = build_ase_voxel_cache(
@@ -29,7 +26,6 @@ def main() -> None:
         overwrite=args.overwrite,
         seed=args.seed,
         scene_ids=args.scene_id,
-        build_camera_cache=args.build_camera_cache,
     )
     output_root = Path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
