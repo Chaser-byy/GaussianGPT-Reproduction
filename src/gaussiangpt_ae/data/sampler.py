@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Union
 
 import numpy as np
 
-from gaussiangpt_ae.data.ase import ASECameras, read_ase_cameras
+from gaussiangpt_ae.data.ase import ASECameras, load_ase_camera_cache
 from gaussiangpt_ae.data.voxelize import load_ase_voxel_cache
 
 
@@ -25,6 +25,8 @@ def _bbox_corners(chunk_world_min: np.ndarray, chunk_world_max: np.ndarray) -> n
 def _zero_camera_score(frame: Dict) -> Dict:
     return {
         "camera_id": frame.get("camera_id"),
+        "frame_index": frame.get("frame_index"),
+        "frame_id": frame.get("frame_id"),
         "file_path": frame.get("file_path"),
         "image_coverage": 0.0,
         "visible_ratio": 0.0,
@@ -39,7 +41,12 @@ def score_cameras_for_chunk(
     chunk_world_max: np.ndarray,
     top_k: int = 12,
 ) -> List[Dict]:
-    """Score cameras by projected chunk bbox overlap with the image plane."""
+    """Score cameras by projected chunk bbox overlap with the image plane.
+
+    visible_ratio is the fraction of the eight chunk bbox corners that are in
+    front of the camera and inside the image. This is a geometric proxy only;
+    no renderer visibility is implied.
+    """
 
     corners = _bbox_corners(chunk_world_min, chunk_world_max)
     corners_h = np.concatenate([corners, np.ones((8, 1), dtype=np.float32)], axis=1)
@@ -48,8 +55,12 @@ def score_cameras_for_chunk(
 
     for frame in cameras.frames:
         try:
-            camera_to_world = np.asarray(frame["transform_matrix"], dtype=np.float32)
-            world_to_camera = np.linalg.inv(camera_to_world)
+            if frame.get("w2c") is not None:
+                world_to_camera = np.asarray(frame["w2c"], dtype=np.float32)
+            else:
+                world_to_camera = np.linalg.inv(
+                    np.asarray(frame["transform_matrix"], dtype=np.float32)
+                ).astype(np.float32)
             camera_points = (world_to_camera @ corners_h.T).T[:, :3]
             front = camera_points[:, 2] > 1e-6
             if not np.any(front):
@@ -59,6 +70,16 @@ def score_cameras_for_chunk(
             visible_points = camera_points[front]
             u = cameras.fx * (visible_points[:, 0] / visible_points[:, 2]) + cameras.cx
             v = cameras.fy * (visible_points[:, 1] / visible_points[:, 2]) + cameras.cy
+            finite = np.isfinite(u) & np.isfinite(v)
+            if not np.any(finite):
+                scores.append(_zero_camera_score(frame))
+                continue
+            u = u[finite]
+            v = v[finite]
+            inside_image = (u >= 0.0) & (u <= float(cameras.width)) & (v >= 0.0) & (
+                v <= float(cameras.height)
+            )
+            visible_ratio = float(np.count_nonzero(inside_image) / corners.shape[0])
 
             x_min = float(np.min(u))
             x_max = float(np.max(u))
@@ -66,7 +87,10 @@ def score_cameras_for_chunk(
             y_max = float(np.max(v))
             projected_area = max(0.0, x_max - x_min) * max(0.0, y_max - y_min)
             if projected_area <= 0.0:
-                scores.append(_zero_camera_score(frame))
+                zero_score = _zero_camera_score(frame)
+                zero_score["valid_projection"] = True
+                zero_score["visible_ratio"] = visible_ratio
+                scores.append(zero_score)
                 continue
 
             inter_x_min = max(0.0, x_min)
@@ -80,11 +104,13 @@ def score_cameras_for_chunk(
             scores.append(
                 {
                     "camera_id": frame.get("camera_id"),
+                    "frame_index": frame.get("frame_index"),
+                    "frame_id": frame.get("frame_id"),
                     "file_path": frame.get("file_path"),
                     "image_coverage": float(intersection_area / image_area)
                     if image_area > 0.0
                     else 0.0,
-                    "visible_ratio": float(intersection_area / projected_area),
+                    "visible_ratio": visible_ratio,
                     "valid_projection": True,
                     "selection_mode": None,
                 }
@@ -120,7 +146,7 @@ def select_cameras_for_chunk(
         for score in scores
         if score["valid_projection"]
         and (score["image_coverage"] > 0.0 or score["visible_ratio"] > 0.0)
-        and score["camera_id"] not in {item["camera_id"] for item in preferred}
+        and score["frame_index"] not in {item["frame_index"] for item in preferred}
     ]
     selected = (preferred + fallback_overlap)[:top_k]
     if selected:
@@ -212,12 +238,24 @@ class ASEOnlineChunkSampler:
             self._scene_cache[key] = load_ase_voxel_cache(path)
         return self._scene_cache[key]
 
-    def _load_cameras(self, transforms_path: str, scene_id: str):
-        if transforms_path not in self._camera_cache:
-            self._camera_cache[transforms_path] = read_ase_cameras(
-                transforms_path, scene_id=scene_id
+    def _camera_cache_path(self, metadata: Dict) -> Path:
+        if metadata.get("camera_cache_path"):
+            return Path(metadata["camera_cache_path"])
+        return self.cache_root / "cameras" / f"{metadata['scene_id']}_cameras.npz"
+
+    def _load_cameras(self, metadata: Dict):
+        camera_cache_path = self._camera_cache_path(metadata)
+        key = str(camera_cache_path)
+        if key not in self._camera_cache:
+            if not camera_cache_path.is_file():
+                raise FileNotFoundError(
+                    f"missing ASE camera cache {camera_cache_path}; rebuild cache with "
+                    "--build-camera-cache"
+                )
+            self._camera_cache[key] = load_ase_camera_cache(
+                camera_cache_path, scene_id=metadata["scene_id"]
             )
-        return self._camera_cache[transforms_path]
+        return self._camera_cache[key]
 
     def _scene_z_info(self, scene_coords: np.ndarray) -> Dict:
         z_min = int(scene_coords[:, 2].min())
@@ -309,7 +347,7 @@ class ASEOnlineChunkSampler:
         chunk_world_max = scene_origin + chunk_max_voxel.astype(np.float32) * voxel_size
 
         transforms_path = metadata["transforms_path"]
-        cameras = self._load_cameras(transforms_path, metadata["scene_id"])
+        cameras = self._load_cameras(metadata)
         top_cameras = select_cameras_for_chunk(
             cameras,
             chunk_world_min,
@@ -337,6 +375,12 @@ class ASEOnlineChunkSampler:
             "num_occupied_voxels": int(chunk["num_occupied_voxels"]),
             "num_gaussians_after_voxel_dedup": int(scene_coords.shape[0]),
             "top_cameras": top_cameras,
+            "camera_debug": {
+                "camera_cache_path": str(self._camera_cache_path(metadata)),
+                "pose_convention": cameras.pose_convention,
+                "uses_transform_device_camera": cameras.uses_transform_device_camera,
+                "top_cameras": top_cameras,
+            },
             "z_mode": self.z_mode,
             "scene_z_min_voxel": int(z_info["scene_z_min_voxel"]),
             "scene_z_max_voxel": int(z_info["scene_z_max_voxel"]),

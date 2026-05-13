@@ -66,6 +66,8 @@ def write_transforms(path: Path) -> None:
         "zipped": False,
         "crop_edge": 0,
         "transform_device_camera": np.eye(4, dtype=np.float32).tolist(),
+        "bbox_min": [-0.1, -0.1, -0.1],
+        "bbox_max": [1.1, 1.1, 0.1],
         "frames_num": 1,
         "frames": [
             {
@@ -95,6 +97,7 @@ def test_build_and_load_ase_voxel_cache(monkeypatch, tmp_path: Path) -> None:
     cache_path = cache_root / "scenes" / "00000.npz"
 
     assert cache_path.exists()
+    assert (cache_root / "cameras" / "00000_cameras.npz").exists()
     assert summary["written_scenes"] == 1
 
     cache = load_ase_voxel_cache(cache_path)
@@ -102,12 +105,15 @@ def test_build_and_load_ase_voxel_cache(monkeypatch, tmp_path: Path) -> None:
     assert cache["scene_coords"].shape[1] == 3
     assert cache["scene_feats"].shape[1] == 14
     assert cache["metadata"]["transforms_path"].endswith("transforms_train.json")
-    assert cache["metadata"]["feature_representation"] == "gaussiangpt_ae_v1"
+    assert (
+        cache["metadata"]["feature_representation"]
+        == "gaussiangpt_ae_v1_softplus_scale"
+    )
     assert cache["metadata"]["color_representation"] == "rgb_from_sh_dc_clamped_0_1"
     assert cache["metadata"]["opacity_representation"] == "logit_clamped_-10_10"
     assert (
         cache["metadata"]["scale_representation"]
-        == "world_size_from_exp_raw_scale"
+        == "world_size_from_softplus_raw_scale"
     )
     assert (
         cache["metadata"]["rotation_representation"]
@@ -118,3 +124,7 @@ def test_build_and_load_ase_voxel_cache(monkeypatch, tmp_path: Path) -> None:
         == "world_offset_from_voxel_center"
     )
     assert cache["metadata"]["feature_scales"]["offset"] == 1.0
+    assert np.allclose(cache["metadata"]["json_bbox_min"], [-0.1, -0.1, -0.1])
+    assert "ply_xyz_min" in cache["metadata"]
+    assert "cache_world_bbox_min" in cache["metadata"]
+    assert np.all(cache["scene_feats"][:, 7:10] > 0.0)

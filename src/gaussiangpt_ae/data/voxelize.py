@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 
-from gaussiangpt_ae.data.ase import discover_ase_scenes, load_ase_scene_gaussians
+from gaussiangpt_ae.data.ase import (
+    discover_ase_scenes,
+    load_ase_scene_gaussians,
+    read_ase_cameras,
+    save_ase_camera_cache,
+)
 from gaussiangpt_ae.data.schema import GaussianScene, validate_gaussian_scene
 
 SH_C0 = 0.28209479177387814
@@ -90,6 +95,11 @@ def _feature_scales(feature_scales: Dict = None) -> Dict:
     return scales
 
 
+def _stable_softplus_numpy(value: np.ndarray) -> np.ndarray:
+    value = np.asarray(value, dtype=np.float32)
+    return (np.log1p(np.exp(-np.abs(value))) + np.maximum(value, 0.0)).astype(np.float32)
+
+
 def encode_gaussian_features_for_ae(
     relative_xyz: np.ndarray,
     color_raw: np.ndarray,
@@ -111,7 +121,7 @@ def encode_gaussian_features_for_ae(
     opacity = np.clip(np.asarray(opacity_raw, dtype=np.float32), -10.0, 10.0)
     opacity = opacity.astype(np.float32) * float(scales["opacity"])
 
-    scale = np.exp(np.asarray(scale_raw, dtype=np.float32))
+    scale = _stable_softplus_numpy(np.asarray(scale_raw, dtype=np.float32))
     scale = np.maximum(scale, 1e-8).astype(np.float32) * float(scales["scale"])
 
     quat = np.asarray(rotation_raw, dtype=np.float32)
@@ -166,41 +176,111 @@ def _metadata_json(metadata: Dict) -> np.ndarray:
     return np.asarray(json.dumps(metadata), dtype=np.str_)
 
 
+def _array_to_list_or_none(value: Optional[np.ndarray]):
+    if value is None:
+        return None
+    return np.asarray(value, dtype=np.float32).tolist()
+
+
+def _bbox_sanity_warnings(
+    json_bbox_min: Optional[np.ndarray],
+    json_bbox_max: Optional[np.ndarray],
+    ply_xyz_min: np.ndarray,
+    ply_xyz_max: np.ndarray,
+    abs_threshold: float = 0.5,
+    rel_threshold: float = 0.25,
+) -> List[str]:
+    """Check scene-level JSON bbox against PLY xyz range without rejecting scenes."""
+
+    if json_bbox_min is None or json_bbox_max is None:
+        return ["missing json bbox_min/bbox_max in transforms_train.json"]
+
+    json_bbox_min = np.asarray(json_bbox_min, dtype=np.float32)
+    json_bbox_max = np.asarray(json_bbox_max, dtype=np.float32)
+    ply_xyz_min = np.asarray(ply_xyz_min, dtype=np.float32)
+    ply_xyz_max = np.asarray(ply_xyz_max, dtype=np.float32)
+    edge = np.maximum(json_bbox_max - json_bbox_min, 1e-6)
+    diff = np.maximum(np.abs(json_bbox_min - ply_xyz_min), np.abs(json_bbox_max - ply_xyz_max))
+    rel = diff / edge
+    if np.any(diff > abs_threshold) or np.any(rel > rel_threshold):
+        return [
+            "json bbox differs from PLY xyz range; json bbox is scene-level metadata, "
+            "not the sampled chunk bbox"
+        ]
+    return []
+
+
+def _cache_world_bbox(
+    scene_origin: np.ndarray,
+    scene_coords: np.ndarray,
+    voxel_size: float,
+) -> tuple:
+    if scene_coords.shape[0] == 0:
+        origin = np.asarray(scene_origin, dtype=np.float32)
+        return origin.copy(), origin.copy()
+    coord_min = scene_coords.min(axis=0).astype(np.float32)
+    coord_max = scene_coords.max(axis=0).astype(np.float32) + 1.0
+    origin = np.asarray(scene_origin, dtype=np.float32)
+    return (
+        (origin + coord_min * float(voxel_size)).astype(np.float32),
+        (origin + coord_max * float(voxel_size)).astype(np.float32),
+    )
+
+
 def build_ase_voxel_cache(
     root: Union[str, Path],
     output_root: Union[str, Path],
     voxel_size: float = 0.025,
     overwrite: bool = False,
     seed: int = 42,
+    scene_ids: Optional[List[str]] = None,
+    build_camera_cache: bool = True,
 ) -> Dict:
     """Voxelize ASE scenes once and save compact scene-level npz caches."""
 
     root = Path(root)
     output_root = Path(output_root)
     scenes_dir = output_root / "scenes"
+    cameras_dir = output_root / "cameras"
     scenes_dir.mkdir(parents=True, exist_ok=True)
+    if build_camera_cache:
+        cameras_dir.mkdir(parents=True, exist_ok=True)
 
     results: List[Dict] = []
     for record in discover_ase_scenes(root):
+        if scene_ids is not None and record.scene_id not in scene_ids:
+            continue
         cache_path = scenes_dir / f"{record.scene_id}.npz"
+        camera_cache_path = cameras_dir / f"{record.scene_id}_cameras.npz"
         item = {
             "scene_id": record.scene_id,
             "cache_path": str(cache_path),
+            "camera_cache_path": str(camera_cache_path) if build_camera_cache else None,
             "written": False,
+            "camera_cache_written": False,
             "skipped": False,
             "error": None,
+            "warnings": [],
         }
         if not record.valid:
             item["error"] = "; ".join(record.warnings)
             results.append(item)
             continue
-        if cache_path.exists() and not overwrite:
+        if (
+            cache_path.exists()
+            and (not build_camera_cache or camera_cache_path.exists())
+            and not overwrite
+        ):
             item["skipped"] = True
             results.append(item)
             continue
 
         try:
             scene = load_ase_scene_gaussians(record)
+            cameras = read_ase_cameras(record.transforms_path, scene_id=record.scene_id)
+            if build_camera_cache and (overwrite or not camera_cache_path.exists()):
+                save_ase_camera_cache(cameras, camera_cache_path)
+                item["camera_cache_written"] = True
             quantized = quantize_scene_with_minkowski(
                 scene, voxel_size=voxel_size, seed=seed
             )
@@ -211,32 +291,60 @@ def build_ase_voxel_cache(
                 quantized["selected_indices"],
                 voxel_size=voxel_size,
             )
+            ply_xyz_min = scene.xyz.min(axis=0).astype(np.float32)
+            ply_xyz_max = scene.xyz.max(axis=0).astype(np.float32)
+            cache_world_bbox_min, cache_world_bbox_max = _cache_world_bbox(
+                quantized["scene_origin"],
+                voxel_features["coords"],
+                voxel_size,
+            )
+            bbox_warnings = _bbox_sanity_warnings(
+                cameras.bbox_min,
+                cameras.bbox_max,
+                ply_xyz_min,
+                ply_xyz_max,
+            )
+            item["warnings"].extend(bbox_warnings)
+            for warning in bbox_warnings:
+                print(f"WARNING scene {record.scene_id}: {warning}")
             metadata = {
                 "scene_id": record.scene_id,
                 "scene_dir": str(record.scene_dir),
                 "ply_path": str(record.ply_path),
                 "transforms_path": str(record.transforms_path),
+                "camera_cache_path": str(camera_cache_path) if build_camera_cache else None,
                 "num_input_gaussians": int(scene.xyz.shape[0]),
                 "num_voxels": int(voxel_features["coords"].shape[0]),
                 "voxel_size": float(voxel_size),
-                "feature_representation": "gaussiangpt_ae_v1",
+                "feature_representation": "gaussiangpt_ae_v1_softplus_scale",
                 "color_representation": "rgb_from_sh_dc_clamped_0_1",
                 "opacity_representation": "logit_clamped_-10_10",
-                "scale_representation": "world_size_from_exp_raw_scale",
+                "scale_representation": "world_size_from_softplus_raw_scale",
                 "rotation_representation": "unit_quaternion_w_positive",
                 "offset_representation": "world_offset_from_voxel_center",
                 "feature_scales": dict(DEFAULT_FEATURE_SCALES),
+                "json_bbox_min": _array_to_list_or_none(cameras.bbox_min),
+                "json_bbox_max": _array_to_list_or_none(cameras.bbox_max),
+                "ply_xyz_min": ply_xyz_min.tolist(),
+                "ply_xyz_max": ply_xyz_max.tolist(),
+                "cache_world_bbox_min": cache_world_bbox_min.tolist(),
+                "cache_world_bbox_max": cache_world_bbox_max.tolist(),
+                # JSON bbox is the ASE scene-level world bbox. Sampled chunk bboxes
+                # must come from sampled voxel coords, scene_origin, and voxel_size.
+                "bbox_semantics": "json bbox is scene-level world bbox, not sampled chunk bbox",
+                "bbox_warnings": bbox_warnings,
             }
-            np.savez_compressed(
-                cache_path,
-                scene_coords=voxel_features["coords"],
-                scene_feats=voxel_features["feats"],
-                selected_global_indices=voxel_features["selected_global_indices"],
-                scene_origin=quantized["scene_origin"],
-                voxel_size=np.asarray(float(voxel_size), dtype=np.float32),
-                metadata_json=_metadata_json(metadata),
-            )
-            item["written"] = True
+            if overwrite or not cache_path.exists():
+                np.savez_compressed(
+                    cache_path,
+                    scene_coords=voxel_features["coords"],
+                    scene_feats=voxel_features["feats"],
+                    selected_global_indices=voxel_features["selected_global_indices"],
+                    scene_origin=quantized["scene_origin"],
+                    voxel_size=np.asarray(float(voxel_size), dtype=np.float32),
+                    metadata_json=_metadata_json(metadata),
+                )
+                item["written"] = True
         except Exception as exc:
             item["error"] = str(exc)
         results.append(item)

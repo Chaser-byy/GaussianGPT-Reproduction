@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 
+from gaussiangpt_ae.data.ase import read_ase_cameras, save_ase_camera_cache
 from gaussiangpt_ae.data.sampler import ASEOnlineChunkSampler
 
 
@@ -45,6 +46,8 @@ def write_transforms(path: Path) -> None:
 def make_fake_scene_cache(cache_root: Path) -> None:
     transforms_path = cache_root / "raw" / "00000" / "transforms_train.json"
     write_transforms(transforms_path)
+    cameras = read_ase_cameras(transforms_path, scene_id="00000")
+    save_ase_camera_cache(cameras, cache_root / "cameras" / "00000_cameras.npz")
     scenes_dir = cache_root / "scenes"
     scenes_dir.mkdir(parents=True, exist_ok=True)
     metadata = {
@@ -52,6 +55,7 @@ def make_fake_scene_cache(cache_root: Path) -> None:
         "scene_dir": str(cache_root / "raw" / "00000"),
         "ply_path": str(cache_root / "raw" / "00000" / "ckpts" / "point_cloud_30000.ply"),
         "transforms_path": str(transforms_path),
+        "camera_cache_path": str(cache_root / "cameras" / "00000_cameras.npz"),
         "num_input_gaussians": 4,
         "num_voxels": 6,
         "voxel_size": 1.0,
@@ -111,6 +115,10 @@ def test_ase_online_chunk_sampler_sample(tmp_path: Path) -> None:
     assert "visible_ratio" in sample["top_cameras"][0]
     assert "valid_projection" in sample["top_cameras"][0]
     assert "selection_mode" in sample["top_cameras"][0]
+    assert "frame_index" in sample["top_cameras"][0]
+    assert "frame_id" in sample["top_cameras"][0]
+    assert "camera_debug" in sample
+    assert sample["camera_debug"]["pose_convention"] == "c2w=frame_transform_matrix"
 
 
 def test_ase_online_chunk_sampler_full_height_z_mode(tmp_path: Path) -> None:

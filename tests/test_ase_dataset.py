@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
+from gaussiangpt_ae.data.ase import read_ase_cameras, save_ase_camera_cache
 from gaussiangpt_ae.data.dataset import ASEChunkDataset
 from gaussiangpt_ae.data.collate import ase_sparse_collate
 
@@ -48,6 +49,9 @@ def write_transforms(path: Path) -> None:
 def make_fake_scene_cache(cache_root: Path) -> None:
     transforms_path = cache_root / "raw" / "00000" / "transforms_train.json"
     write_transforms(transforms_path)
+    camera_cache_path = cache_root / "cameras" / "00000_cameras.npz"
+    cameras = read_ase_cameras(transforms_path, scene_id="00000")
+    save_ase_camera_cache(cameras, camera_cache_path)
     scenes_dir = cache_root / "scenes"
     scenes_dir.mkdir(parents=True, exist_ok=True)
     metadata = {
@@ -55,6 +59,7 @@ def make_fake_scene_cache(cache_root: Path) -> None:
         "scene_dir": str(cache_root / "raw" / "00000"),
         "ply_path": str(cache_root / "raw" / "00000" / "ckpts" / "point_cloud_30000.ply"),
         "transforms_path": str(transforms_path),
+        "camera_cache_path": str(camera_cache_path),
         "num_input_gaussians": 4,
         "num_voxels": 4,
         "voxel_size": 1.0,
@@ -90,6 +95,8 @@ def test_ase_chunk_dataset_and_sparse_collate(monkeypatch, tmp_path: Path) -> No
     assert sample["coords"].shape[1] == 3
     assert sample["feats"].shape[1] == 14
     assert "metadata" in sample
+    assert "chunk_shape_voxels" in sample["metadata"]
+    assert "camera_debug" in sample["metadata"]
 
     batch = ase_sparse_collate([sample, dataset[1]])
     assert batch["coords"].shape[1] == 4
