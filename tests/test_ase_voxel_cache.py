@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 from plyfile import PlyData, PlyElement
 
-from gaussiangpt_ae.data.ase_voxel_cache import (
+from gaussiangpt_ae.data.voxelize import (
     build_ase_voxel_cache,
     load_ase_voxel_cache,
 )

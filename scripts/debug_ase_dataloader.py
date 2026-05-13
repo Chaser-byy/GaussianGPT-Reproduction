@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from gaussiangpt_ae.data.ase_dataset import ASEChunkDataset
+from gaussiangpt_ae.data.dataset import ASEChunkDataset
 from gaussiangpt_ae.data.collate import ase_sparse_collate
 
 

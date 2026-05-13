@@ -3,7 +3,7 @@ from pathlib import Path
 
 import numpy as np
 
-from gaussiangpt_ae.data.ase_camera import camera_summary, read_ase_cameras
+from gaussiangpt_ae.data.ase import camera_summary, read_ase_cameras
 
 
 def write_transforms(path: Path) -> None:

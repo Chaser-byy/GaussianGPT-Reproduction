@@ -7,9 +7,8 @@ from typing import Dict, List, Optional, Union
 
 import numpy as np
 
-from gaussiangpt_ae.data.ase_camera import ASECameras
-from gaussiangpt_ae.data.ase_camera import read_ase_cameras
-from gaussiangpt_ae.data.ase_voxel_cache import load_ase_voxel_cache
+from gaussiangpt_ae.data.ase import ASECameras, read_ase_cameras
+from gaussiangpt_ae.data.voxelize import load_ase_voxel_cache
 
 
 def _bbox_corners(chunk_world_min: np.ndarray, chunk_world_max: np.ndarray) -> np.ndarray:
@@ -30,6 +29,7 @@ def _zero_camera_score(frame: Dict) -> Dict:
         "image_coverage": 0.0,
         "visible_ratio": 0.0,
         "valid_projection": False,
+        "selection_mode": None,
     }
 
 
@@ -86,12 +86,50 @@ def score_cameras_for_chunk(
                     else 0.0,
                     "visible_ratio": float(intersection_area / projected_area),
                     "valid_projection": True,
+                    "selection_mode": None,
                 }
             )
         except Exception:
             scores.append(_zero_camera_score(frame))
 
     return sorted(scores, key=lambda item: item["image_coverage"], reverse=True)[:top_k]
+
+
+def select_cameras_for_chunk(
+    cameras: ASECameras,
+    chunk_world_min: np.ndarray,
+    chunk_world_max: np.ndarray,
+    top_k: int = 12,
+    preferred_coverage: float = 0.4,
+) -> List[Dict]:
+    """Select cameras for a chunk and annotate why each camera was selected."""
+
+    scores = score_cameras_for_chunk(
+        cameras,
+        chunk_world_min,
+        chunk_world_max,
+        top_k=len(cameras.frames),
+    )
+    preferred = [
+        dict(score, selection_mode="preferred")
+        for score in scores
+        if score["valid_projection"] and score["image_coverage"] >= preferred_coverage
+    ]
+    fallback_overlap = [
+        dict(score, selection_mode="fallback_overlap")
+        for score in scores
+        if score["valid_projection"]
+        and (score["image_coverage"] > 0.0 or score["visible_ratio"] > 0.0)
+        and score["camera_id"] not in {item["camera_id"] for item in preferred}
+    ]
+    selected = (preferred + fallback_overlap)[:top_k]
+    if selected:
+        return selected
+
+    return [
+        dict(score, selection_mode="no_overlap_topk")
+        for score in scores[:top_k]
+    ]
 
 
 def build_chunk_from_scene_cache(
@@ -137,6 +175,8 @@ class ASEOnlineChunkSampler:
         max_candidate_chunks: int = 10,
         top_k_cameras: int = 12,
         seed: int = 42,
+        z_mode: str = "fixed_160",
+        preferred_coverage: float = 0.4,
     ) -> None:
         self.cache_root = Path(cache_root)
         self.scene_cache_paths = sorted((self.cache_root / "scenes").glob("*.npz"))
@@ -150,12 +190,19 @@ class ASEOnlineChunkSampler:
         self.max_candidate_chunks = int(max_candidate_chunks)
         self.top_k_cameras = int(top_k_cameras)
         self.seed = int(seed)
+        self.z_mode = z_mode
+        self.preferred_coverage = float(preferred_coverage)
         self.rng = np.random.RandomState(self.seed)
+        if self.z_mode not in {"fixed_160", "full_height"}:
+            raise ValueError("z_mode must be 'fixed_160' or 'full_height'")
 
-        side = int(round(self.chunk_size / self.voxel_size))
-        if side <= 0:
+        self.xy_voxels = int(round(self.chunk_size / self.voxel_size))
+        if self.xy_voxels <= 0:
             raise ValueError("chunk_size / voxel_size must round to a positive integer")
-        self.chunk_shape_voxels = np.asarray([side, side, side], dtype=np.int32)
+        self.chunk_shape_voxels = np.asarray(
+            [self.xy_voxels, self.xy_voxels, self.xy_voxels],
+            dtype=np.int32,
+        )
         self._scene_cache: Dict[str, Dict] = {str(self.scene_cache_paths[0]): first_cache}
         self._camera_cache: Dict[str, object] = {}
 
@@ -172,43 +219,67 @@ class ASEOnlineChunkSampler:
             )
         return self._camera_cache[transforms_path]
 
-    def _sample_chunk_min(self, scene_coords: np.ndarray) -> np.ndarray:
+    def _scene_z_info(self, scene_coords: np.ndarray) -> Dict:
+        z_min = int(scene_coords[:, 2].min())
+        z_max = int(scene_coords[:, 2].max()) + 1
+        z_voxels = self.xy_voxels if self.z_mode == "fixed_160" else z_max - z_min
+        return {
+            "scene_z_min_voxel": z_min,
+            "scene_z_max_voxel": z_max,
+            "scene_z_voxels": z_max - z_min,
+            "chunk_shape_voxels": np.asarray(
+                [self.xy_voxels, self.xy_voxels, z_voxels], dtype=np.int32
+            ),
+        }
+
+    def _sample_chunk_min(
+        self, scene_coords: np.ndarray, chunk_shape_voxels: np.ndarray
+    ) -> np.ndarray:
         coord_min = scene_coords.min(axis=0).astype(np.int32)
         coord_max = scene_coords.max(axis=0).astype(np.int32)
         chunk_min = np.zeros(3, dtype=np.int32)
         for axis in (0, 1):
             low = int(coord_min[axis])
-            high = int(coord_max[axis] - self.chunk_shape_voxels[axis] + 1)
+            high = int(coord_max[axis] - chunk_shape_voxels[axis] + 1)
             if high < low:
                 high = low
             chunk_min[axis] = int(self.rng.randint(low, high + 1))
         chunk_min[2] = int(coord_min[2])
         return chunk_min
 
-    def _chunk_occupancy(self, scene_coords: np.ndarray, chunk_min_voxel: np.ndarray) -> float:
-        chunk_max_voxel = chunk_min_voxel + self.chunk_shape_voxels
+    def _chunk_occupancy(
+        self,
+        scene_coords: np.ndarray,
+        chunk_min_voxel: np.ndarray,
+        chunk_shape_voxels: np.ndarray,
+    ) -> float:
+        chunk_max_voxel = chunk_min_voxel + chunk_shape_voxels
         inside = np.all(
             (scene_coords >= chunk_min_voxel) & (scene_coords < chunk_max_voxel),
             axis=1,
         )
-        total_voxels = int(np.prod(self.chunk_shape_voxels))
+        total_voxels = int(np.prod(chunk_shape_voxels))
         return float(np.count_nonzero(inside) / total_voxels) if total_voxels > 0 else 0.0
 
-    def _choose_chunk(self, scene_coords: np.ndarray) -> tuple:
+    def _choose_chunk(self, scene_coords: np.ndarray, chunk_shape_voxels: np.ndarray) -> tuple:
         best_chunk_min: Optional[np.ndarray] = None
         best_occupancy = -1.0
+        candidate_occupancies = []
         for _ in range(self.max_candidate_chunks):
-            candidate = self._sample_chunk_min(scene_coords)
-            occupancy = self._chunk_occupancy(scene_coords, candidate)
+            candidate = self._sample_chunk_min(scene_coords, chunk_shape_voxels)
+            occupancy = self._chunk_occupancy(scene_coords, candidate, chunk_shape_voxels)
+            candidate_occupancies.append(float(occupancy))
             if occupancy > best_occupancy:
                 best_chunk_min = candidate
                 best_occupancy = occupancy
             if occupancy >= self.occupancy_threshold:
-                return candidate, occupancy
+                return candidate, occupancy, True, candidate_occupancies, best_occupancy
         if best_chunk_min is None:
             best_chunk_min = scene_coords.min(axis=0).astype(np.int32)
-            best_occupancy = self._chunk_occupancy(scene_coords, best_chunk_min)
-        return best_chunk_min, best_occupancy
+            best_occupancy = self._chunk_occupancy(
+                scene_coords, best_chunk_min, chunk_shape_voxels
+            )
+        return best_chunk_min, best_occupancy, False, candidate_occupancies, best_occupancy
 
     def sample(self) -> Dict:
         """Sample one random chunk from a random scene cache."""
@@ -219,10 +290,18 @@ class ASEOnlineChunkSampler:
         scene_origin = scene_cache["scene_origin"]
         metadata = scene_cache["metadata"]
 
-        chunk_min_voxel, occupancy = self._choose_chunk(scene_coords)
-        chunk_max_voxel = chunk_min_voxel + self.chunk_shape_voxels
+        z_info = self._scene_z_info(scene_coords)
+        chunk_shape_voxels = z_info["chunk_shape_voxels"]
+        (
+            chunk_min_voxel,
+            occupancy,
+            accepted_by_threshold,
+            candidate_occupancies,
+            best_candidate_occupancy,
+        ) = self._choose_chunk(scene_coords, chunk_shape_voxels)
+        chunk_max_voxel = chunk_min_voxel + chunk_shape_voxels
         chunk = build_chunk_from_scene_cache(
-            scene_cache, chunk_min_voxel, self.chunk_shape_voxels
+            scene_cache, chunk_min_voxel, chunk_shape_voxels
         )
 
         voxel_size = float(scene_cache["voxel_size"])
@@ -231,8 +310,12 @@ class ASEOnlineChunkSampler:
 
         transforms_path = metadata["transforms_path"]
         cameras = self._load_cameras(transforms_path, metadata["scene_id"])
-        top_cameras = score_cameras_for_chunk(
-            cameras, chunk_world_min, chunk_world_max, top_k=self.top_k_cameras
+        top_cameras = select_cameras_for_chunk(
+            cameras,
+            chunk_world_min,
+            chunk_world_max,
+            top_k=self.top_k_cameras,
+            preferred_coverage=self.preferred_coverage,
         )
 
         return {
@@ -249,9 +332,16 @@ class ASEOnlineChunkSampler:
             "chunk_world_min": chunk_world_min.astype(np.float32, copy=False),
             "chunk_world_max": chunk_world_max.astype(np.float32, copy=False),
             "voxel_size": voxel_size,
-            "chunk_shape_voxels": self.chunk_shape_voxels.copy(),
+            "chunk_shape_voxels": chunk_shape_voxels.copy(),
             "occupancy": float(occupancy),
             "num_occupied_voxels": int(chunk["num_occupied_voxels"]),
             "num_gaussians_after_voxel_dedup": int(scene_coords.shape[0]),
             "top_cameras": top_cameras,
+            "z_mode": self.z_mode,
+            "scene_z_min_voxel": int(z_info["scene_z_min_voxel"]),
+            "scene_z_max_voxel": int(z_info["scene_z_max_voxel"]),
+            "scene_z_voxels": int(z_info["scene_z_voxels"]),
+            "accepted_by_threshold": bool(accepted_by_threshold),
+            "candidate_occupancies": candidate_occupancies,
+            "best_candidate_occupancy": float(best_candidate_occupancy),
         }

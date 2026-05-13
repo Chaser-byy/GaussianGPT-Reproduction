@@ -3,7 +3,7 @@ import types
 
 import numpy as np
 
-from gaussiangpt_ae.data.me_voxelize import (
+from gaussiangpt_ae.data.voxelize import (
     build_scene_voxel_features,
     quantize_scene_with_minkowski,
 )
@@ -11,7 +11,10 @@ from gaussiangpt_ae.data.schema import GaussianScene
 
 
 def install_fake_minkowski(monkeypatch):
+    calls = {"sparse_quantize": 0}
+
     def sparse_quantize(coordinates, return_index=False):
+        calls["sparse_quantize"] += 1
         _, index = np.unique(coordinates, axis=0, return_index=True)
         index = np.sort(index).astype(np.int64)
         if return_index:
@@ -20,6 +23,7 @@ def install_fake_minkowski(monkeypatch):
 
     fake_me = types.SimpleNamespace(utils=types.SimpleNamespace(sparse_quantize=sparse_quantize))
     monkeypatch.setitem(sys.modules, "MinkowskiEngine", fake_me)
+    return calls
 
 
 def make_scene() -> GaussianScene:
@@ -69,11 +73,12 @@ def make_scene() -> GaussianScene:
 
 
 def test_quantize_scene_with_minkowski_returns_coords_and_indices(monkeypatch) -> None:
-    install_fake_minkowski(monkeypatch)
+    calls = install_fake_minkowski(monkeypatch)
     scene = make_scene()
 
     quantized = quantize_scene_with_minkowski(scene, voxel_size=1.0, seed=7)
 
+    assert calls["sparse_quantize"] == 1
     assert quantized["scene_origin"].shape == (3,)
     assert quantized["scene_coords"].dtype == np.int32
     assert quantized["scene_coords"].shape[1] == 3

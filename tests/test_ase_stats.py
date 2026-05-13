@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from gaussiangpt_ae.data.ase_scene import read_ase_stats
+from gaussiangpt_ae.data.ase import read_ase_stats
 
 
 def test_read_ase_stats_reads_json_and_records_sources(tmp_path: Path) -> None:

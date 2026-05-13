@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Union
 
-from gaussiangpt_ae.data.ase_online_sampler import ASEOnlineChunkSampler
+from gaussiangpt_ae.data.sampler import ASEOnlineChunkSampler
 
 
 class ASEChunkDataset:
@@ -20,6 +20,8 @@ class ASEChunkDataset:
         max_candidate_chunks: int = 10,
         top_k_cameras: int = 12,
         seed: int = 42,
+        z_mode: str = "fixed_160",
+        preferred_coverage: float = 0.4,
     ) -> None:
         self.num_samples_per_epoch = int(num_samples_per_epoch)
         self.sampler = ASEOnlineChunkSampler(
@@ -29,6 +31,8 @@ class ASEChunkDataset:
             max_candidate_chunks=max_candidate_chunks,
             top_k_cameras=top_k_cameras,
             seed=seed,
+            z_mode=z_mode,
+            preferred_coverage=preferred_coverage,
         )
 
     def __len__(self) -> int:
@@ -48,5 +52,9 @@ class ASEChunkDataset:
             "voxel_size": sample["voxel_size"],
             "occupancy": sample["occupancy"],
             "top_cameras": sample["top_cameras"],
+            "z_mode": sample["z_mode"],
+            "accepted_by_threshold": sample["accepted_by_threshold"],
+            "candidate_occupancies": sample["candidate_occupancies"],
+            "best_candidate_occupancy": sample["best_candidate_occupancy"],
         }
         return sample

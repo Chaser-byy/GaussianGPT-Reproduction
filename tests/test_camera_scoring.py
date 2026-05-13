@@ -1,7 +1,7 @@
 import numpy as np
 
-from gaussiangpt_ae.data.ase_camera import ASECameras
-from gaussiangpt_ae.data.ase_online_sampler import score_cameras_for_chunk
+from gaussiangpt_ae.data.ase import ASECameras
+from gaussiangpt_ae.data.sampler import score_cameras_for_chunk
 
 
 def test_score_cameras_for_chunk_returns_scores() -> None:

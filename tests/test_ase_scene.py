@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 from plyfile import PlyData, PlyElement
 
-from gaussiangpt_ae.data.ase_scene import (
+from gaussiangpt_ae.data.ase import (
     build_ase_scene_manifest,
     discover_ase_scenes,
     find_ase_ply,

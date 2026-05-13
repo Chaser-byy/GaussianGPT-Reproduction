@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-from gaussiangpt_ae.data.ase_scene import (
+from gaussiangpt_ae.data.ase import (
     build_ase_scene_manifest,
     discover_ase_scenes,
     load_ase_scene_gaussians,
