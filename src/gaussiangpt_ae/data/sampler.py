@@ -203,11 +203,19 @@ class ASEOnlineChunkSampler:
         seed: int = 42,
         z_mode: str = "fixed_160",
         preferred_coverage: float = 0.4,
+        scene_id: Optional[str] = None,
     ) -> None:
         self.cache_root = Path(cache_root)
         self.scene_cache_paths = sorted((self.cache_root / "scenes").glob("*.npz"))
+        if scene_id is not None:
+            self.scene_cache_paths = [
+                path for path in self.scene_cache_paths if path.stem == scene_id
+            ]
         if not self.scene_cache_paths:
-            raise ValueError(f"no ASE voxel cache files found under {self.cache_root}/scenes")
+            detail = f" for scene_id={scene_id}" if scene_id is not None else ""
+            raise ValueError(
+                f"no ASE voxel cache files found under {self.cache_root}/scenes{detail}"
+            )
 
         first_cache = load_ase_voxel_cache(self.scene_cache_paths[0])
         self.voxel_size = float(first_cache["voxel_size"])
@@ -217,6 +225,7 @@ class ASEOnlineChunkSampler:
         self.top_k_cameras = int(top_k_cameras)
         self.seed = int(seed)
         self.z_mode = z_mode
+        self.scene_id = scene_id
         self.preferred_coverage = float(preferred_coverage)
         self.rng = np.random.RandomState(self.seed)
         if self.z_mode not in {"fixed_160", "full_height"}:
