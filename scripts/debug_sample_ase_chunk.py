@@ -9,9 +9,8 @@ from gaussiangpt_ae.data.ase_online_sampler import ASEOnlineChunkSampler
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root", required=True)
+    parser.add_argument("--cache-root", required=True)
     parser.add_argument("--num-samples", type=int, default=1)
-    parser.add_argument("--voxel-size", type=float, default=0.025)
     parser.add_argument("--chunk-size", type=float, default=4.0)
     parser.add_argument("--occupancy-threshold", type=float, default=0.2)
     parser.add_argument("--top-k-cameras", type=int, default=12)
@@ -19,8 +18,7 @@ def main() -> None:
     args = parser.parse_args()
 
     sampler = ASEOnlineChunkSampler(
-        root=args.root,
-        voxel_size=args.voxel_size,
+        cache_root=args.cache_root,
         chunk_size=args.chunk_size,
         occupancy_threshold=args.occupancy_threshold,
         top_k_cameras=args.top_k_cameras,

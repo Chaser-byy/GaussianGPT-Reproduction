@@ -1,9 +1,24 @@
 import json
+import sys
+import types
 from pathlib import Path
 
 import numpy as np
 
-from gaussiangpt_ae.data.ase_online_sampler import ASEOnlineChunkSampler
+from gaussiangpt_ae.data.ase_dataset import ASEChunkDataset
+from gaussiangpt_ae.data.collate import ase_sparse_collate
+
+
+def install_fake_torch(monkeypatch):
+    class FakeTorch:
+        long = np.int64
+        float32 = np.float32
+
+        @staticmethod
+        def as_tensor(array, dtype=None):
+            return np.asarray(array, dtype=dtype)
+
+    monkeypatch.setitem(sys.modules, "torch", FakeTorch)
 
 
 def write_transforms(path: Path) -> None:
@@ -57,24 +72,27 @@ def make_fake_scene_cache(cache_root: Path) -> None:
     )
 
 
-def test_ase_online_chunk_sampler_sample(tmp_path: Path) -> None:
+def test_ase_chunk_dataset_and_sparse_collate(monkeypatch, tmp_path: Path) -> None:
+    install_fake_torch(monkeypatch)
     make_fake_scene_cache(tmp_path)
 
-    sampler = ASEOnlineChunkSampler(
+    dataset = ASEChunkDataset(
         cache_root=tmp_path,
+        num_samples_per_epoch=2,
         chunk_size=2.0,
         occupancy_threshold=0.0,
         top_k_cameras=1,
         seed=5,
     )
 
-    sample = sampler.sample()
-
-    assert sample["coords"].ndim == 2
+    sample = dataset[0]
+    assert len(dataset) == 2
     assert sample["coords"].shape[1] == 3
-    assert sample["feats"].shape == (sample["coords"].shape[0], 14)
-    assert sample["target_feats"].shape == (sample["coords"].shape[0], 14)
-    assert sample["chunk_min_voxel"][2] == 0
-    assert np.all(sample["coords"] >= 0)
-    assert np.all(sample["coords"] < sample["chunk_shape_voxels"])
-    assert sample["top_cameras"]
+    assert sample["feats"].shape[1] == 14
+    assert "metadata" in sample
+
+    batch = ase_sparse_collate([sample, dataset[1]])
+    assert batch["coords"].shape[1] == 4
+    assert batch["feats"].shape[1] == 14
+    assert batch["target_feats"].shape[1] == 14
+    assert len(batch["metas"]) == 2

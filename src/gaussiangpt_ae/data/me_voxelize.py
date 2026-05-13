@@ -8,6 +8,15 @@ import numpy as np
 
 from gaussiangpt_ae.data.schema import GaussianScene, validate_gaussian_scene
 
+SH_C0 = 0.28209479177387814
+DEFAULT_FEATURE_SCALES = {
+    "offset": 1.0,
+    "color": 1.0,
+    "opacity": 1.0,
+    "scale": 1.0,
+    "rotation": 1.0,
+}
+
 
 def _import_minkowski_engine():
     try:
@@ -71,66 +80,80 @@ def quantize_scene_with_minkowski(
     }
 
 
-def build_chunk_features_from_quantized_scene(
+def _feature_scales(feature_scales: Dict = None) -> Dict:
+    scales = dict(DEFAULT_FEATURE_SCALES)
+    if feature_scales is not None:
+        scales.update(feature_scales)
+    return scales
+
+
+def encode_gaussian_features_for_ae(
+    relative_xyz: np.ndarray,
+    color_raw: np.ndarray,
+    opacity_raw: np.ndarray,
+    scale_raw: np.ndarray,
+    rotation_raw: np.ndarray,
+    voxel_size: float,
+    feature_scales: Dict = None,
+) -> np.ndarray:
+    """Encode Gaussian attributes using the GaussianGPT AE feature representation."""
+
+    del voxel_size
+    scales = _feature_scales(feature_scales)
+
+    relative_xyz = np.asarray(relative_xyz, dtype=np.float32) * float(scales["offset"])
+    rgb = np.asarray(color_raw, dtype=np.float32) * SH_C0 + 0.5
+    rgb = np.clip(rgb, 0.0, 1.0).astype(np.float32) * float(scales["color"])
+
+    opacity = np.clip(np.asarray(opacity_raw, dtype=np.float32), -10.0, 10.0)
+    opacity = opacity.astype(np.float32) * float(scales["opacity"])
+
+    scale = np.exp(np.asarray(scale_raw, dtype=np.float32))
+    scale = np.maximum(scale, 1e-8).astype(np.float32) * float(scales["scale"])
+
+    quat = np.asarray(rotation_raw, dtype=np.float32)
+    quat = quat / (np.linalg.norm(quat, axis=1, keepdims=True) + 1e-8)
+    negative_w = quat[:, 0] < 0
+    quat[negative_w] *= -1.0
+    quat = quat.astype(np.float32) * float(scales["rotation"])
+
+    return np.concatenate([relative_xyz, rgb, opacity, scale, quat], axis=1).astype(
+        np.float32, copy=False
+    )
+
+
+def build_scene_voxel_features(
     scene: GaussianScene,
     scene_origin: np.ndarray,
     scene_coords: np.ndarray,
     selected_indices: np.ndarray,
-    chunk_min_voxel: np.ndarray,
-    chunk_shape_voxels: np.ndarray,
     voxel_size: float = 0.025,
-    seed: int = 42,
+    feature_scales: Dict = None,
 ) -> Dict:
-    """Build chunk-local coordinates and 14D Gaussian features from quantized scene data."""
+    """Build whole-scene 14D voxel features after sparse quantization."""
 
-    del seed
     validate_gaussian_scene(scene)
-
     scene_origin = np.asarray(scene_origin, dtype=np.float32)
     scene_coords = np.asarray(scene_coords, dtype=np.int32)
     selected_indices = np.asarray(selected_indices, dtype=np.int64)
-    chunk_min_voxel = np.asarray(chunk_min_voxel, dtype=np.int32)
-    chunk_shape_voxels = np.asarray(chunk_shape_voxels, dtype=np.int32)
-    chunk_max_voxel = chunk_min_voxel + chunk_shape_voxels
 
-    inside_mask = np.all(
-        (scene_coords >= chunk_min_voxel) & (scene_coords < chunk_max_voxel),
-        axis=1,
-    )
-    scene_coords_inside = scene_coords[inside_mask]
-    selected_global_indices = selected_indices[inside_mask].astype(np.int64, copy=False)
-    local_coords = (scene_coords_inside - chunk_min_voxel).astype(np.int32, copy=False)
-
-    if selected_global_indices.size == 0:
-        feats = np.zeros((0, 14), dtype=np.float32)
-        return {
-            "coords": local_coords.reshape(0, 3),
-            "feats": feats,
-            "target_feats": feats.copy(),
-            "selected_global_indices": selected_global_indices,
-            "num_occupied_voxels": 0,
-        }
-
-    xyz_selected = scene.xyz[selected_global_indices]
-    voxel_center_world = scene_origin + (scene_coords_inside.astype(np.float32) + 0.5) * float(
+    voxel_center_world = scene_origin + (scene_coords.astype(np.float32) + 0.5) * float(
         voxel_size
     )
+    xyz_selected = scene.xyz[selected_indices]
     relative_xyz = (xyz_selected - voxel_center_world).astype(np.float32)
-    feats = np.concatenate(
-        [
-            relative_xyz,
-            scene.color[selected_global_indices],
-            scene.opacity[selected_global_indices],
-            scene.scale[selected_global_indices],
-            scene.rotation[selected_global_indices],
-        ],
-        axis=1,
-    ).astype(np.float32, copy=False)
+    feats = encode_gaussian_features_for_ae(
+        relative_xyz=relative_xyz,
+        color_raw=scene.color[selected_indices],
+        opacity_raw=scene.opacity[selected_indices],
+        scale_raw=scene.scale[selected_indices],
+        rotation_raw=scene.rotation[selected_indices],
+        voxel_size=voxel_size,
+        feature_scales=feature_scales,
+    )
 
     return {
-        "coords": local_coords,
+        "coords": scene_coords.astype(np.int32, copy=False),
         "feats": feats,
-        "target_feats": feats.copy(),
-        "selected_global_indices": selected_global_indices,
-        "num_occupied_voxels": int(local_coords.shape[0]),
+        "selected_global_indices": selected_indices.astype(np.int64, copy=False),
     }
