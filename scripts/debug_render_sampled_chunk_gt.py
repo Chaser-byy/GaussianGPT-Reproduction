@@ -34,9 +34,18 @@ def _camera_to_json(camera: Dict) -> Dict:
         "frame_index",
         "frame_id",
         "file_path",
+        "chunk_coverage",
         "image_coverage",
         "visible_ratio",
+        "visible_corners",
+        "total_corners",
         "valid_projection",
+        "projected_bbox",
+        "projected_bbox_area",
+        "intersection_area",
+        "depth_min",
+        "depth_max",
+        "near_plane_crossing",
         "selection_mode",
     )
     return {key: camera.get(key) for key in keys}

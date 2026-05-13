@@ -28,9 +28,18 @@ def _zero_camera_score(frame: Dict) -> Dict:
         "frame_index": frame.get("frame_index"),
         "frame_id": frame.get("frame_id"),
         "file_path": frame.get("file_path"),
+        "chunk_coverage": 0.0,
         "image_coverage": 0.0,
         "visible_ratio": 0.0,
+        "visible_corners": 0,
+        "total_corners": 8,
         "valid_projection": False,
+        "projected_bbox": None,
+        "projected_bbox_area": 0.0,
+        "intersection_area": 0.0,
+        "depth_min": None,
+        "depth_max": None,
+        "near_plane_crossing": False,
         "selection_mode": None,
     }
 
@@ -43,9 +52,11 @@ def score_cameras_for_chunk(
 ) -> List[Dict]:
     """Score cameras by projected chunk bbox overlap with the image plane.
 
-    visible_ratio is the fraction of the eight chunk bbox corners that are in
-    front of the camera and inside the image. This is a geometric proxy only;
-    no renderer visibility is implied.
+    chunk_coverage follows the GaussianGPT ASE heuristic: it is the fraction of
+    the projected chunk bbox area contained by the camera image window. The
+    projected bbox is built from the chunk corners that are in front of the
+    camera and finite after projection. This is geometric scoring only; no
+    renderer visibility is implied.
     """
 
     corners = _bbox_corners(chunk_world_min, chunk_world_max)
@@ -62,9 +73,16 @@ def score_cameras_for_chunk(
                     np.asarray(frame["transform_matrix"], dtype=np.float32)
                 ).astype(np.float32)
             camera_points = (world_to_camera @ corners_h.T).T[:, :3]
-            front = camera_points[:, 2] > 1e-6
+            depth = camera_points[:, 2]
+            depth_min = float(np.min(depth))
+            depth_max = float(np.max(depth))
+            near_plane_crossing = bool(depth_min <= 1e-6 < depth_max)
+            front = depth > 1e-6
             if not np.any(front):
-                scores.append(_zero_camera_score(frame))
+                zero_score = _zero_camera_score(frame)
+                zero_score["depth_min"] = depth_min
+                zero_score["depth_max"] = depth_max
+                scores.append(zero_score)
                 continue
 
             visible_points = camera_points[front]
@@ -72,24 +90,36 @@ def score_cameras_for_chunk(
             v = cameras.fy * (visible_points[:, 1] / visible_points[:, 2]) + cameras.cy
             finite = np.isfinite(u) & np.isfinite(v)
             if not np.any(finite):
-                scores.append(_zero_camera_score(frame))
+                zero_score = _zero_camera_score(frame)
+                zero_score["depth_min"] = depth_min
+                zero_score["depth_max"] = depth_max
+                zero_score["near_plane_crossing"] = near_plane_crossing
+                scores.append(zero_score)
                 continue
             u = u[finite]
             v = v[finite]
             inside_image = (u >= 0.0) & (u <= float(cameras.width)) & (v >= 0.0) & (
                 v <= float(cameras.height)
             )
-            visible_ratio = float(np.count_nonzero(inside_image) / corners.shape[0])
+            visible_corners = int(np.count_nonzero(inside_image))
+            total_corners = int(corners.shape[0])
+            visible_ratio = float(visible_corners / total_corners)
 
             x_min = float(np.min(u))
             x_max = float(np.max(u))
             y_min = float(np.min(v))
             y_max = float(np.max(v))
-            projected_area = max(0.0, x_max - x_min) * max(0.0, y_max - y_min)
-            if projected_area <= 0.0:
+            projected_bbox = [x_min, y_min, x_max, y_max]
+            projected_bbox_area = max(0.0, x_max - x_min) * max(0.0, y_max - y_min)
+            if projected_bbox_area <= 0.0:
                 zero_score = _zero_camera_score(frame)
-                zero_score["valid_projection"] = True
                 zero_score["visible_ratio"] = visible_ratio
+                zero_score["visible_corners"] = visible_corners
+                zero_score["total_corners"] = total_corners
+                zero_score["projected_bbox"] = projected_bbox
+                zero_score["depth_min"] = depth_min
+                zero_score["depth_max"] = depth_max
+                zero_score["near_plane_crossing"] = near_plane_crossing
                 scores.append(zero_score)
                 continue
 
@@ -100,6 +130,10 @@ def score_cameras_for_chunk(
             intersection_area = max(0.0, inter_x_max - inter_x_min) * max(
                 0.0, inter_y_max - inter_y_min
             )
+            chunk_coverage = float(intersection_area / projected_bbox_area)
+            image_coverage = (
+                float(intersection_area / image_area) if image_area > 0.0 else 0.0
+            )
 
             scores.append(
                 {
@@ -107,18 +141,33 @@ def score_cameras_for_chunk(
                     "frame_index": frame.get("frame_index"),
                     "frame_id": frame.get("frame_id"),
                     "file_path": frame.get("file_path"),
-                    "image_coverage": float(intersection_area / image_area)
-                    if image_area > 0.0
-                    else 0.0,
+                    "chunk_coverage": chunk_coverage,
+                    "image_coverage": image_coverage,
                     "visible_ratio": visible_ratio,
+                    "visible_corners": visible_corners,
+                    "total_corners": total_corners,
                     "valid_projection": True,
+                    "projected_bbox": projected_bbox,
+                    "projected_bbox_area": float(projected_bbox_area),
+                    "intersection_area": float(intersection_area),
+                    "depth_min": depth_min,
+                    "depth_max": depth_max,
+                    "near_plane_crossing": near_plane_crossing,
                     "selection_mode": None,
                 }
             )
         except Exception:
             scores.append(_zero_camera_score(frame))
 
-    return sorted(scores, key=lambda item: item["image_coverage"], reverse=True)[:top_k]
+    return sorted(
+        scores,
+        key=lambda item: (
+            item["chunk_coverage"],
+            item["intersection_area"],
+            item["image_coverage"],
+        ),
+        reverse=True,
+    )[:top_k]
 
 
 def select_cameras_for_chunk(
@@ -139,13 +188,13 @@ def select_cameras_for_chunk(
     preferred = [
         dict(score, selection_mode="preferred")
         for score in scores
-        if score["valid_projection"] and score["image_coverage"] >= preferred_coverage
+        if score["valid_projection"] and score["chunk_coverage"] >= preferred_coverage
     ]
     fallback_overlap = [
         dict(score, selection_mode="fallback_overlap")
         for score in scores
         if score["valid_projection"]
-        and (score["image_coverage"] > 0.0 or score["visible_ratio"] > 0.0)
+        and score["intersection_area"] > 0.0
         and score["frame_index"] not in {item["frame_index"] for item in preferred}
     ]
     selected = (preferred + fallback_overlap)[:top_k]
