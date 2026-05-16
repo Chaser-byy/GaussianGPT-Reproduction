@@ -45,6 +45,10 @@ data/raw/
 data/processed/
 data/cache/
 data/tokens/
+!src/**/data/
+!src/**/data/**
+src/**/data/__pycache__/
+src/**/data/**/*.py[cod]
 
 # Outputs / renders
 outputs/

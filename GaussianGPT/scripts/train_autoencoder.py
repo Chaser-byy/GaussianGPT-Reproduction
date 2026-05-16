@@ -10,7 +10,9 @@ Paper training details:
 """
 import os
 import argparse
+import math
 import yaml
+from functools import lru_cache
 from typing import Optional
 
 import torch
@@ -23,16 +25,32 @@ import numpy as np
 from plyfile import PlyData, PlyElement
 
 import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_GAUSSIANGPT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_REPO_ROOT = os.path.dirname(_GAUSSIANGPT_ROOT)
+_SRC_ROOT = os.path.join(_REPO_ROOT, "src")
+for _path in (_GAUSSIANGPT_ROOT, _SRC_ROOT):
+    if os.path.isdir(_path) and _path not in sys.path:
+        sys.path.insert(0, _path)
 
 from gaussiangpt.autoencoder import GaussianAutoencoder
 from gaussiangpt.autoencoder.diagnostics import ColorClampDiagnostics
 from gaussiangpt.data import GaussianSceneDataset
 from gaussiangpt.utils.rendering import (
     HAS_RASTERIZER,
+    MiniCam,
+    projection_matrix,
     sample_cameras_around_bbox,
     render_gaussians,
 )
+
+
+_WARNED_MESSAGES = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    if key not in _WARNED_MESSAGES:
+        print(message)
+        _WARNED_MESSAGES.add(key)
 
 
 def parse_args():
@@ -62,14 +80,20 @@ def ase_batch_to_sample_list(batch: dict):
 
     Expected ASE batch format:
       coords:       (M, 4), [batch_idx, x, y, z]
-      target_feats: (M, 14), [offset(3), color(3), opacity(1), scale(3), rotation(4)]
+      feats:        (M, 14), [offset(3), color(3), opacity(1), scale(3), rotation(4)]
+      target_feats: (M, 14), same order as feats
       metas:        list[dict], optional, may contain chunk_min_voxel/scene_origin
     """
     coords = batch["coords"]
-    feats = batch.get("target_feats", batch.get("feats"))
+    feats = batch.get("feats")
+    target_feats = batch.get("target_feats")
     metas = batch.get("metas", [])
-    if feats is None:
+    if feats is None and target_feats is None:
         raise KeyError("ASE batch must contain 'target_feats' or 'feats'")
+    if feats is None:
+        feats = target_feats
+    if target_feats is None:
+        target_feats = feats
 
     samples = []
     batch_ids = coords[:, 0].long()
@@ -77,29 +101,45 @@ def ase_batch_to_sample_list(batch: dict):
         mask = batch_ids == batch_idx
         sample_coords = coords[mask, 1:4].long()
         sample_feats = feats[mask].float()
+        sample_target_feats = target_feats[mask].float()
         meta = metas[int(batch_idx.item())] if int(batch_idx.item()) < len(metas) else {}
+        meta = dict(meta or {})
 
         # ASE samples already store coords relative to the sampled chunk.
         # Keep chunk_min_voxel only for reconstructing absolute/world coords.
         chunk_origin = torch.as_tensor(
-            meta.get("chunk_min_voxel", [0, 0, 0]), dtype=torch.long,
+            meta.get("chunk_min_voxel", meta.get("chunk_origin", [0, 0, 0])),
+            dtype=torch.long,
         )
         scene_origin = torch.as_tensor(
             meta.get("scene_origin", [0.0, 0.0, 0.0]), dtype=torch.float32,
         )
+        input_gaussians = _split_feature_tensor(sample_feats)
+        target_gaussians = _split_feature_tensor(sample_target_feats)
 
-        samples.append({
+        sample = {
             "voxel_coords": sample_coords,
             "chunk_origin": chunk_origin,
             "scene_origin": scene_origin,
-            "offset": sample_feats[:, 0:3],
-            "color": sample_feats[:, 3:6],
-            "opacity": sample_feats[:, 6:7],
-            "scale": sample_feats[:, 7:10],
-            "rotation": sample_feats[:, 10:14],
+            **input_gaussians,
+            "target_gaussians": target_gaussians,
             "meta": meta,
-        })
+        }
+        samples.append(sample)
     return samples
+
+
+def _split_feature_tensor(feats: torch.Tensor) -> dict:
+    """Split ASE 14-D features in the project-standard order."""
+    if feats.shape[-1] != 14:
+        raise ValueError(f"ASE feature dimension must be 14, got {feats.shape[-1]}")
+    return {
+        "offset": feats[:, 0:3],
+        "color": feats[:, 3:6],
+        "opacity": feats[:, 6:7],
+        "scale": feats[:, 7:10],
+        "rotation": feats[:, 10:14],
+    }
 
 
 def normalize_batch_for_trainer(batch):
@@ -116,15 +156,14 @@ def build_ase_dataset(cfg: dict, split: str):
     from gaussiangpt_ae.data.dataset import ASEChunkDataset
 
     data_cfg = cfg["data"]
+    if data_cfg.get("cache_root") is None:
+        raise ValueError(
+            "ASE dataset config requires data.cache_root to point at the ASE cache root"
+        )
     scene_ids = data_cfg.get("scene_ids")
     split_ids = data_cfg.get(f"{split}_scene_ids")
     if split_ids is not None:
         scene_ids = split_ids
-    if scene_ids is None:
-        raise ValueError(
-            "ASE dataset config requires data.scene_ids or "
-            f"data.{split}_scene_ids"
-        )
 
     return ASEChunkDataset(
         cache_root=data_cfg["cache_root"],
@@ -174,6 +213,158 @@ def _build_world_positions(
     return voxel_centers + pred_offset
 
 
+def _sample_voxel_size(sample: dict, cfg: dict) -> float:
+    meta = sample.get("meta") or {}
+    if meta.get("voxel_size") is not None:
+        return float(meta["voxel_size"])
+    return float(cfg.get("data", {}).get("base_voxel_size", cfg["model"].get("base_voxel_size", 0.025)))
+
+
+@lru_cache(maxsize=128)
+def _load_ase_cameras_cached(camera_source: str):
+    from gaussiangpt_ae.data.ase import load_ase_camera_cache, read_ase_cameras
+
+    if camera_source.endswith(".npz"):
+        return load_ase_camera_cache(camera_source)
+    return read_ase_cameras(camera_source)
+
+
+def _find_ase_frame(cameras, camera_score: dict) -> Optional[dict]:
+    frame_index = camera_score.get("frame_index")
+    if frame_index is not None:
+        for frame in cameras.frames:
+            if int(frame.get("frame_index", -1)) == int(frame_index):
+                return frame
+    frame_id = camera_score.get("frame_id")
+    if frame_id is not None:
+        for frame in cameras.frames:
+            if int(frame.get("frame_id", -1)) == int(frame_id):
+                return frame
+    camera_id = camera_score.get("camera_id")
+    if camera_id is not None:
+        for frame in cameras.frames:
+            if frame.get("camera_id") == camera_id:
+                return frame
+    return None
+
+
+def _ase_frame_to_minicam(frame: dict, cameras, image_size: int, device: torch.device) -> MiniCam:
+    w2c = torch.as_tensor(frame["w2c"], dtype=torch.float32, device=device)
+    world_view_transform = w2c.t().contiguous()
+
+    fovx = 2.0 * math.atan(float(cameras.width) / (2.0 * float(cameras.fx)))
+    fovy = 2.0 * math.atan(float(cameras.height) / (2.0 * float(cameras.fy)))
+    proj = projection_matrix(0.01, 100.0, fovx, fovy, device=device)
+    full_proj_transform = world_view_transform @ proj
+    camera_center = torch.linalg.inv(world_view_transform)[3, :3]
+    return MiniCam(
+        image_height=int(image_size),
+        image_width=int(image_size),
+        fovx=fovx,
+        fovy=fovy,
+        znear=0.01,
+        zfar=100.0,
+        world_view_transform=world_view_transform,
+        full_proj_transform=full_proj_transform,
+        camera_center=camera_center,
+    )
+
+
+def _ase_render_cameras_from_metadata(
+    sample: dict,
+    n_views: int,
+    image_size: int,
+    device: torch.device,
+) -> Optional[list]:
+    meta = sample.get("meta") or {}
+    top_cameras = meta.get("top_cameras") or []
+    if not top_cameras:
+        return None
+
+    camera_debug = meta.get("camera_debug") or {}
+    camera_source = (
+        camera_debug.get("camera_cache_path")
+        or meta.get("camera_cache_path")
+        or meta.get("transforms_path")
+    )
+    if not camera_source:
+        _warn_once(
+            "ase_missing_camera_source",
+            "WARNING: ASE top_cameras are present but no camera cache/transforms path "
+            "was found; falling back to synthetic cameras.",
+        )
+        return None
+
+    try:
+        cameras = _load_ase_cameras_cached(str(camera_source))
+    except Exception as exc:
+        _warn_once(
+            f"ase_camera_load_failed:{camera_source}",
+            f"WARNING: failed to load ASE cameras from {camera_source}: {exc}; "
+            "falling back to synthetic cameras.",
+        )
+        return None
+
+    selected = []
+    for camera_score in top_cameras[:n_views]:
+        frame = _find_ase_frame(cameras, camera_score)
+        if frame is None:
+            continue
+        selected.append(_ase_frame_to_minicam(frame, cameras, image_size, device))
+
+    if not selected:
+        _warn_once(
+            "ase_no_matching_top_cameras",
+            "WARNING: ASE top_cameras did not match any loaded camera frames; "
+            "falling back to synthetic cameras.",
+        )
+        return None
+    return selected
+
+
+def _render_cameras_for_sample(
+    sample: dict,
+    gt_position: torch.Tensor,
+    cfg: dict,
+    device: torch.device,
+    rng: torch.Generator = None,
+    jitter: Optional[float] = None,
+) -> list:
+    loss_cfg = cfg.get("loss", {})
+    n_views = int(loss_cfg.get("n_images", 0))
+    img_size = int(loss_cfg.get("render_size", 128))
+    if n_views <= 0:
+        return []
+
+    dataset_kind = str(cfg.get("data", {}).get("dataset", "gaussian_scene")).lower()
+    if dataset_kind == "ase":
+        cameras = _ase_render_cameras_from_metadata(sample, n_views, img_size, device)
+        if cameras:
+            return cameras
+        _warn_once(
+            "ase_synthetic_camera_fallback",
+            "WARNING: ASE batch has no usable top_cameras; falling back to synthetic "
+            "bbox cameras for render loss.",
+        )
+
+    bbox_min = gt_position.min(dim=0).values.detach()
+    bbox_max = gt_position.max(dim=0).values.detach()
+    if jitter is None:
+        jitter = float(loss_cfg.get("camera_jitter", 0.0))
+    return sample_cameras_around_bbox(
+        bbox_min=bbox_min,
+        bbox_max=bbox_max,
+        n_views=n_views,
+        image_height=img_size,
+        image_width=img_size,
+        fov_deg=float(loss_cfg.get("fov_deg", 60.0)),
+        radius_factor=float(loss_cfg.get("radius_factor", 1.5)),
+        upper_hemisphere_only=bool(loss_cfg.get("upper_hemisphere_only", False)),
+        jitter=float(jitter),
+        rng=rng,
+    )
+
+
 def _render_loss_for_sample(
     sample: dict,
     pred_gaussians: dict,
@@ -199,7 +390,7 @@ def _render_loss_for_sample(
         zero = torch.zeros((), device=device)
         return zero, zero
 
-    base_voxel_size = float(cfg["data"]["base_voxel_size"])
+    base_voxel_size = _sample_voxel_size(sample, cfg)
 
     # Build absolute world positions for both GT and reconstruction.
     # GaussianGPT predicts offsets as unbounded world-space values
@@ -212,22 +403,10 @@ def _render_loss_for_sample(
         sample, pred_gaussians["offset"], base_voxel_size, device
     )
 
-    # Camera sphere is sized from the GT bbox so the views naturally cover
-    # the scene as it gets reconstructed.
-    bbox_min = gt_position.min(dim=0).values.detach()
-    bbox_max = gt_position.max(dim=0).values.detach()
-    cameras = sample_cameras_around_bbox(
-        bbox_min=bbox_min,
-        bbox_max=bbox_max,
-        n_views=n_views,
-        image_height=img_size,
-        image_width=img_size,
-        fov_deg=float(loss_cfg.get("fov_deg", 60.0)),
-        radius_factor=float(loss_cfg.get("radius_factor", 1.5)),
-        upper_hemisphere_only=bool(loss_cfg.get("upper_hemisphere_only", False)),
-        jitter=float(loss_cfg.get("camera_jitter", 0.0)),
-        rng=rng,
-    )
+    cameras = _render_cameras_for_sample(sample, gt_position, cfg, device, rng=rng)
+    if not cameras:
+        zero = torch.zeros((), device=device)
+        return zero, zero
 
     bg = torch.zeros(3, device=device)
     gt_pack = {
@@ -257,7 +436,7 @@ def _render_loss_for_sample(
             perc_buf_pred.append(img_pred)
             perc_buf_gt.append(img_gt)
 
-    l_rgb = l_rgb / float(n_views)
+    l_rgb = l_rgb / float(len(cameras))
     if perc_buf_pred:
         # Stack views into a batch for one VGG call (fewer kernel launches).
         l_perc = perceptual(
@@ -300,6 +479,15 @@ def compute_batch_loss(
         voxel_coords = sample["voxel_coords"].to(device)
         gaussians = {k: v.to(device) for k, v in sample.items()
                      if k in ("offset", "scale", "opacity", "rotation", "color", "sh")}
+        target_gaussians = sample.get("target_gaussians")
+        if target_gaussians is None:
+            target_gaussians = gaussians
+        else:
+            target_gaussians = {
+                k: v.to(device)
+                for k, v in target_gaussians.items()
+                if k in ("offset", "scale", "opacity", "rotation", "color", "sh")
+            }
 
         pred_gaussians, occ_list, lfq_loss, indices = raw_model(gaussians, voxel_coords)
 
@@ -336,11 +524,11 @@ def compute_batch_loss(
             # here so the renderer can use them. The same is done in
             # `_render_loss_for_sample` for the GT.
             pred_gaussians["position"] = _build_world_positions(
-                sample, pred_gaussians["offset"], cfg["data"]["base_voxel_size"], device,
+                sample, pred_gaussians["offset"], _sample_voxel_size(sample, cfg), device,
             )
         if lambda_rgb > 0 or lambda_perc > 0:
             l_rgb, l_perc = _render_loss_for_sample(
-                sample, pred_gaussians, gaussians, cfg, device,
+                sample, pred_gaussians, target_gaussians, cfg, device,
                 perceptual=perceptual, rng=rng,
             )
         else:
@@ -494,23 +682,23 @@ def save_validation_reconstruction(
     GT, bottom row = predicted) for quick eyeballing.
     """
     voxel_coords = sample["voxel_coords"].to(device)
-    chunk_origin = sample["chunk_origin"].to(device)
     gaussians = {k: v.to(device) for k, v in sample.items()
                  if k in ("offset", "scale", "opacity", "rotation", "color", "sh")}
+    target_gaussians = sample.get("target_gaussians")
+    if target_gaussians is None:
+        target_gaussians = gaussians
+    else:
+        target_gaussians = {
+            k: v.to(device)
+            for k, v in target_gaussians.items()
+            if k in ("offset", "scale", "opacity", "rotation", "color", "sh")
+        }
 
     pred_gaussians, _, _, _ = raw_model(gaussians, voxel_coords)
-    base_voxel_size = float(cfg["data"]["base_voxel_size"])
-    abs_voxel_coords = voxel_coords + chunk_origin
-    scene_origin = sample.get("scene_origin")
-    if scene_origin is None:
-        scene_origin = torch.zeros(3, device=device, dtype=pred_gaussians["offset"].dtype)
-    else:
-        scene_origin = scene_origin.to(device=device, dtype=pred_gaussians["offset"].dtype)
-    voxel_centers = (
-        scene_origin
-        + (abs_voxel_coords.to(pred_gaussians["offset"].dtype) + 0.5) * base_voxel_size
+    base_voxel_size = _sample_voxel_size(sample, cfg)
+    pred_gaussians["position"] = _build_world_positions(
+        sample, pred_gaussians["offset"], base_voxel_size, device,
     )
-    pred_gaussians["position"] = voxel_centers + pred_gaussians["offset"]
     save_gaussians_as_ply(pred_gaussians, ply_path)
 
     # ---- Optional: render GT vs. Pred views and save as a side-by-side PNG ----
@@ -523,30 +711,24 @@ def save_validation_reconstruction(
     if n_views <= 0:
         return
 
-    gt_position = voxel_centers + gaussians["offset"]
-    bbox_min = gt_position.min(dim=0).values
-    bbox_max = gt_position.max(dim=0).values
-    # Validation views are deterministic (no jitter) so renderings are
-    # directly comparable across val runs.
-    cameras = sample_cameras_around_bbox(
-        bbox_min=bbox_min,
-        bbox_max=bbox_max,
-        n_views=n_views,
-        image_height=img_size,
-        image_width=img_size,
-        fov_deg=float(loss_cfg.get("fov_deg", 60.0)),
-        radius_factor=float(loss_cfg.get("radius_factor", 1.5)),
-        upper_hemisphere_only=bool(loss_cfg.get("upper_hemisphere_only", False)),
-        jitter=0.0,
+    gt_position = _build_world_positions(
+        sample, target_gaussians["offset"], base_voxel_size, device,
     )
+    # Validation views are deterministic (no jitter) when synthetic cameras
+    # are used, and ASE uses the selected real top_cameras when available.
+    cameras = _render_cameras_for_sample(
+        sample, gt_position, cfg, device, jitter=0.0,
+    )
+    if not cameras:
+        return
 
     bg = torch.zeros(3, device=device)
     gt_pack = {
         "position": gt_position,
-        "scale": gaussians["scale"],
-        "rotation": gaussians["rotation"],
-        "opacity": gaussians["opacity"],
-        "color": gaussians["color"],
+        "scale": target_gaussians["scale"],
+        "rotation": target_gaussians["rotation"],
+        "opacity": target_gaussians["opacity"],
+        "color": target_gaussians["color"],
     }
     pred_pack = {
         "position": pred_gaussians["position"],
@@ -600,9 +782,10 @@ def validate(
     val_rng.manual_seed(int(global_step))
     with torch.no_grad():
         for batch_list in val_loader:
+            sample_list = normalize_batch_for_trainer(batch_list)
             (batch_loss, batch_occ, batch_lfq,
              batch_rgb, batch_perc) = compute_batch_loss(
-                raw_model, batch_list, cfg, device, backward=False,
+                raw_model, sample_list, cfg, device, backward=False,
                 perceptual=perceptual, rng=val_rng,
             )
             total_loss += batch_loss.item()
@@ -610,9 +793,9 @@ def validate(
             total_lfq += batch_lfq
             total_rgb += batch_rgb
             total_perc += batch_perc
-            if not saved_reconstruction and batch_list:
+            if not saved_reconstruction and sample_list:
                 save_validation_reconstruction(
-                    raw_model, batch_list[0], cfg, device,
+                    raw_model, sample_list[0], cfg, device,
                     ply_path=recon_path, image_path=image_path,
                 )
                 saved_reconstruction = True
@@ -715,14 +898,16 @@ def train(cfg: dict, args):
         )
 
     batch_size = args.batch_size or cfg["training"]["batch_size"]
+    num_workers = int(cfg["data"].get("num_workers", 4))
+    val_num_workers = int(cfg["data"].get("val_num_workers", max(0, min(2, num_workers))))
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, shuffle=True,
-        num_workers=4, pin_memory=False, drop_last=True,
+        num_workers=num_workers, pin_memory=False, drop_last=True,
         collate_fn=collate_fn,
     )
     val_loader = DataLoader(
         val_dataset, batch_size=batch_size, shuffle=False,
-        num_workers=2, pin_memory=False,
+        num_workers=val_num_workers, pin_memory=False,
         collate_fn=collate_fn,
     )
 

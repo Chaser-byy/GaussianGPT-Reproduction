@@ -30,11 +30,30 @@ def ase_sparse_collate(batch: List[Dict]) -> Dict:
     feats_parts = []
     target_parts = []
     metas = []
+    metadata_keys = (
+        "scene_id",
+        "ply_path",
+        "transforms_path",
+        "scene_origin",
+        "chunk_min_voxel",
+        "chunk_max_voxel",
+        "chunk_world_min",
+        "chunk_world_max",
+        "voxel_size",
+        "chunk_shape_voxels",
+        "occupancy",
+        "top_cameras",
+        "camera_debug",
+    )
     for sample in batch:
         coords_list.append(np.asarray(sample["coords"], dtype=np.int32))
         feats_parts.append(np.asarray(sample["feats"], dtype=np.float32))
         target_parts.append(np.asarray(sample["target_feats"], dtype=np.float32))
-        metas.append(sample.get("metadata", {}))
+        meta = dict(sample.get("metadata", {}))
+        for key in metadata_keys:
+            if key in sample and key not in meta:
+                meta[key] = sample[key]
+        metas.append(meta)
 
     try:
         import MinkowskiEngine as ME
