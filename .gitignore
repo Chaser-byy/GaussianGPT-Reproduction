@@ -2,47 +2,105 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
 .python-version
 .pytest_cache/
-.ruff_cache/
 .mypy_cache/
+.ruff_cache/
 .coverage
 htmlcov/
-*.pyc
-.pytest_cache/
-.venv/
-outputs/
-data/raw/
-*.ply
-*.pt
-*.pth
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+*.egg-info/
+build/
+dist/
 
 # Virtual environments
 .venv/
 venv/
 env/
+ENV/
+conda/
 
-# Data and generated artifacts
+# Logs
+*.log
+logs/
+log/
+
+# Experiment tracking
+wandb/
+runs/
+tensorboard/
+events.out.tfevents*
+
+# Data / cache
+data/
+datasets/
+dataset/
+cache/
+.cache/
+processed/
+preprocessed/
 data/raw/
 data/processed/
 data/cache/
 data/tokens/
-outputs/
-runs/
-wandb/
 
-# Checkpoints and large assets
+# Outputs / renders
+outputs/
+output/
+results/
+renders/
+rendered/
+vis/
+visualization/
+tmp/
+temp/
+
+# Checkpoints / weights
+checkpoints/
+checkpoint/
+ckpts/
+pretrained/
+weights/
+models/
 *.pt
 *.pth
 *.ckpt
+*.safetensors
+
+# Large 3D / numpy / serialized data
 *.ply
 *.npz
 *.npy
-*.tar
-*.zip
+*.pkl
+*.pickle
+*.h5
+*.hdf5
 
-# Local tooling
-.vscode/
-.idea/
+# Archives
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# Local binary docs copied with upstream code
+GaussianGPT/*.pdf
+
+# Third-party clones and local package checkouts
+GaussianGPT/packages/
+GaussianGPT/.git/
+GaussianGPT/.gitignore
+
+# System / editor
 .DS_Store
 Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.example.json
+**/.vscode/*
+!**/.vscode/extensions.json
+!**/.vscode/settings.example.json
+.idea/
